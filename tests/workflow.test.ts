@@ -1,0 +1,45 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, expect, test } from "vitest";
+import type { PluginContext, ToolContext } from "@modera/plugin-sdk";
+import { activate } from "../src/index";
+
+const roots: string[] = [];
+afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
+
+test("a model draft waits for user confirmation and then runs native step conversations in order", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-test-"));
+  roots.push(root);
+  const started: string[] = [];
+  let background: Promise<void> | undefined;
+  const host = {
+    storagePath: root,
+    signal: new AbortController().signal,
+    invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ conversations: [], models: [{ profileId: "local", name: "Local", models: ["test-model"], efforts: { "test-model": ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object) => ({ ...target, sessionId: `session-${started.length + 1}` }),
+      startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: `run-${started.length}` }; },
+      inspect: async () => ({ outcome: "completed" }),
+      result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: `result of ${runId}` }),
+    },
+  } as unknown as PluginContext;
+  const contributions = await activate(host);
+  if (!contributions?.tools || !contributions.ui) throw new Error("Workflow contributions missing");
+  const context = { projectId: "project", sessionId: "parent", runId: "parent-run", signal: host.signal } as ToolContext;
+  const output = await contributions.tools[0]!.execute({ title: "Release", steps: [
+    { title: "Implement", instruction: "Change code" },
+    { title: "Verify", instruction: "Run checks" },
+  ] }, context) as { flowId: string };
+  expect(started).toEqual([]);
+  const workbench = contributions.ui.find(item => item.id === "modera.workflow.workbench")!;
+  await workbench.act!({ id: "start", value: output.flowId }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
+  await background;
+  expect(started).toEqual(["Implement", "Verify"]);
+  const view = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
+  expect(JSON.stringify(view.children)).toContain("已完成");
+  expect(JSON.stringify(view.children)).toContain("session-2");
+});

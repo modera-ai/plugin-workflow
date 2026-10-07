@@ -83,7 +83,7 @@ test("a replaced run cannot become a completed step through a stale result read 
     result: async () => ({ outcome: "unknown", text: "" }),
   } } as unknown as PluginContext;
   const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
-  if (!workbench?.act) throw new Error("Workflow workbench missing");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   await expect(workbench.act({ id: "retry", value: "flow" }, context, request)).rejects.toThrow("结果已变化或无法确认");
@@ -367,7 +367,7 @@ test("inserting a step makes former successors wait and deleting it restores the
     { title: "Join", instruction: "Join", after: [2, 3] },
   ] }, context) as { flowId: string };
   const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
-  if (!workbench?.act) throw new Error("Workflow workbench missing");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   const readSteps = async () => (JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: { id: string; dependsOn: string[] }[] }[] }).flows[0]!.steps;
   const original = await readSteps();
@@ -382,6 +382,11 @@ test("inserting a step makes former successors wait and deleting it restores the
   expect(restored[1]!.dependsOn).toEqual([original[0]!.id]);
   expect(restored[2]!.dependsOn).toEqual([original[0]!.id]);
   expect(restored[3]!.dependsOn).toEqual([original[1]!.id, original[2]!.id]);
+  await workbench.act({ id: "moveDown", value: JSON.stringify({ flowId: created.flowId, stepId: original[0]!.id }) }, context, request);
+  const reordered = await readSteps();
+  expect(reordered.map(step => step.id)).toEqual([original[1]!.id, original[0]!.id, original[2]!.id, original[3]!.id]);
+  expect(Object.fromEntries(reordered.map(step => [step.id, step.dependsOn]))).toEqual(Object.fromEntries(restored.map(step => [step.id, step.dependsOn])));
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("上下移动只调整显示位置");
 });
 
 test("creating a workflow keeps the oldest record after one hundred entries and a restart", async () => {

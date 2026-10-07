@@ -498,9 +498,10 @@ export const activate: PluginModule["activate"] = async host => {
         options: [{ label: `默认：${defaultLabel}`, value: "default" }, ...listed.map(item => ({ label: item.label, value: item.value })), ...(pinned && !listed.some(item => item.value === pinned) ? [{ label: catalog.find(item => item.value === pinned)?.label ?? "当前选择已不可用", value: pinned }] : [])],
       }] : []),
       ...(flow.state === "draft" ? [
+        { type: "text" as const, text: "上下移动只调整显示位置；执行先后由上方前置步骤决定。" },
         { type: "row" as const, children: [
-          ...(index > 0 ? [{ type: "button" as const, label: "上移", action: "moveUp", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
-          ...(index < flow.steps.length - 1 ? [{ type: "button" as const, label: "下移", action: "moveDown", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
+          ...(index > 0 ? [{ type: "button" as const, label: "上移显示位置", action: "moveUp", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
+          ...(index < flow.steps.length - 1 ? [{ type: "button" as const, label: "下移显示位置", action: "moveDown", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
           ...(flow.steps.length > 2 ? [{ type: "button" as const, label: "删除步骤", action: "deleteStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), icon: "trash" as const, quiet: true }] : []),
         ] },
         ...(flow.steps.length < 8 ? [{ type: "form" as const, label: "插入后续步骤（原后续步骤将等待它完成）", placeholder: "新步骤名称", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "addStep", maxLength: 120, submitIcon: "plus" as const }] : []),

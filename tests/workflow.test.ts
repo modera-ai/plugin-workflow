@@ -608,6 +608,45 @@ test("parallel approval buttons confirm only their own step", async () => {
   expect((await workbench.render(request, context)).data?.active).toMatchObject({ state: "completed" });
 });
 
+test("an independent task runs before the workflow pauses for a parallel approval", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-approval-parallel-task-"));
+  roots.push(root);
+  const started: string[] = [];
+  let background: Promise<void> | undefined;
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object) => ({ ...target, sessionId: `session-${started.length + 1}` }),
+      startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: `run-${started.length}` }; },
+      inspect: async () => ({ outcome: "completed" }), result: async () => ({ outcome: "completed", text: "done" }),
+    },
+  } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const created = await contributions?.tools?.[0]?.execute({ title: "Release", steps: [
+    { title: "Human review", instruction: "Review", after: [] },
+    { title: "Independent check", instruction: "Check", after: [] },
+    { title: "Publish", instruction: "Publish", after: [1, 2] },
+  ] }, context) as { flowId: string };
+  const flow = (JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: { id: string }[] }[] }).flows[0]!;
+  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  await workbench.act({ id: "setStepKind", value: JSON.stringify({ context: JSON.stringify({ flowId: created.flowId, stepId: flow.steps[0]!.id }), value: "approval" }) }, context, request);
+  await workbench.act({ id: "start", value: created.flowId }, context, request);
+  await background;
+  expect(started).toEqual(["Independent check"]);
+  const paused = (await workbench.render(request, context)).data?.active as { state: string; steps: { state: string }[] };
+  expect(paused.state).toBe("paused");
+  expect(paused.steps.map(step => step.state)).toEqual(["awaitingApproval", "completed", "pending"]);
+  await workbench.act({ id: "approveStep", value: JSON.stringify({ flowId: created.flowId, stepId: flow.steps[0]!.id }) }, context, request);
+  await background;
+  expect(started).toEqual(["Independent check", "Publish"]);
+  expect((await workbench.render(request, context)).data?.active).toMatchObject({ state: "completed" });
+});
+
 test("an approval step pauses after prior work and resumes from persisted state", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-approval-test-"));
   roots.push(root);

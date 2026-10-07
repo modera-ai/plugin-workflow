@@ -207,10 +207,13 @@ export const activate: PluginModule["activate"] = async host => {
           if (!ready.length) throw new Error("工作流没有可运行步骤，请检查依赖和失败步骤状态");
           const approvals = ready.filter(step => step.kind === "approval");
           if (approvals.length) {
-            await save(() => { for (const step of approvals) step.state = "awaitingApproval"; flow.state = "paused"; flow.error = undefined; });
-            return;
+            await save(() => { for (const step of approvals) step.state = "awaitingApproval"; flow.error = undefined; });
           }
           const peerTasks = ready.filter(step => step.kind !== "approval");
+          if (!peerTasks.length) {
+            await save(() => { flow.state = "paused"; });
+            return;
+          }
           const outcomes = await Promise.allSettled(peerTasks.map(async step => {
             try { await executeStep(step, peerTasks); }
             catch (error) { await save(() => { step.state = "failed"; }); throw error; }

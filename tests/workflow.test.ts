@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, test } from "vitest";
@@ -7,6 +7,106 @@ import { activate } from "../src/index";
 
 const roots: string[] = [];
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
+
+test("independent workflow steps start together and a join waits for both results", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-graph-"));
+  roots.push(root);
+  const started: string[] = [];
+  const prompts = new Map<string, string>();
+  let releasePair!: () => void;
+  const pair = new Promise<void>(resolve => { releasePair = resolve; });
+  let background: Promise<void> | undefined;
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object, title: string) => ({ ...target, sessionId: title }),
+      startRole: async (_target: unknown, role: { name: string }, prompt: string) => { prompts.set(role.name, prompt); started.push(role.name); if (started.length === 2) releasePair(); if (role.name !== "Join") await pair; return { runId: role.name }; },
+      inspect: async () => ({ outcome: "completed" }), result: async (_target: unknown, runId: string) => ({ text: `result ${runId}` }),
+    },
+  } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render || !contributions?.tools) throw new Error("Workflow contributions missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const created = await contributions.tools[0]!.execute({ title: "Parallel", steps: [
+    { title: "A", instruction: "Do A" }, { title: "B", instruction: "Do B" }, { title: "Join", instruction: "Combine" },
+  ] }, context) as { flowId: string };
+  const saved = JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: { id: string }[] }[] };
+  const [a, b, joined] = saved.flows[0]!.steps;
+  const toggle = (stepId: string, prerequisiteId: string) => workbench.act!({ id: "toggleDependency", value: JSON.stringify({ flowId: created.flowId, stepId, prerequisiteId }) }, context, request);
+  await toggle(b!.id, a!.id);
+  await toggle(joined!.id, a!.id);
+  await expect(toggle(a!.id, joined!.id)).rejects.toThrow("循环");
+  await workbench.act({ id: "start", value: created.flowId }, context, request);
+  await background;
+  expect(started.slice(0, 2).sort()).toEqual(["A", "B"]);
+  expect(started[2]).toBe("Join");
+  expect(prompts.get("A")).not.toContain("前序步骤结果");
+  expect(prompts.get("B")).not.toContain("前序步骤结果");
+  expect(prompts.get("Join")).toContain("A: result A");
+  expect(prompts.get("Join")).toContain("B: result B");
+  const view = await workbench.render(request, context);
+  expect(JSON.stringify(view.children)).toContain("已完成");
+  expect(JSON.stringify(view.children)).toContain("前置步骤：A、B");
+});
+
+test("workflow draft accepts explicit graph edges and rejects cycles before saving", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-draft-graph-"));
+  roots.push(root);
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ models: [] }), target() {}, prepare() {}, startRole() {}, result() {}, inspect() {},
+  } } as unknown as PluginContext;
+  const tool = (await activate(host))?.tools?.[0];
+  if (!tool) throw new Error("Workflow draft tool missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const steps = [
+    { title: "A", instruction: "Do A", after: [] },
+    { title: "B", instruction: "Do B", after: [] },
+    { title: "Join", instruction: "Combine", after: [1, 2] },
+  ];
+  await tool.execute({ title: "Graph", steps }, context);
+  const saved = JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: { id: string; dependsOn: string[] }[] }[] };
+  expect(saved.flows[0]!.steps[2]!.dependsOn).toEqual(saved.flows[0]!.steps.slice(0, 2).map(step => step.id));
+  await expect(tool.execute({ title: "Cycle", steps: [{ ...steps[0], after: [3] }, steps[1], steps[2]] }, context)).rejects.toThrow("循环");
+  expect((JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: unknown[] }).flows).toHaveLength(1);
+});
+
+test("interrupted parallel run recovers every completed node before rerunning uncertain nodes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-parallel-recovery-"));
+  roots.push(root);
+  await writeFile(join(root, "flows.json"), JSON.stringify({ version: 1, flows: [{ id: "flow", projectId: "project", title: "Recover", state: "running", createdAt: 1, steps: [
+    { id: "a", title: "A", instruction: "A", dependsOn: [], state: "running", target: { projectId: "project", sessionId: "old-a" }, runId: "run-a" },
+    { id: "b", title: "B", instruction: "B", dependsOn: [], state: "running", target: { projectId: "project", sessionId: "old-b" }, runId: "run-b" },
+    { id: "join", title: "Join", instruction: "Join", dependsOn: ["a", "b"], state: "pending" },
+  ] }] }));
+  const started: string[] = [];
+  let background: Promise<void> | undefined;
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object, title: string) => ({ ...target, sessionId: title }),
+      startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: `new-${role.name}` }; },
+      inspect: async (_target: unknown, runId?: string) => ({ outcome: runId === "run-b" ? "unknown" : "completed", busy: false }),
+      result: async (_target: unknown, runId: string) => ({ text: `result ${runId}` }),
+    },
+  } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  await expect(workbench.act({ id: "retry", value: "flow" }, context, request)).rejects.toThrow("未能确认");
+  await workbench.act({ id: "rerunUnknown", value: "flow" }, context, request);
+  await background;
+  expect(started).toEqual(["B", "Join"]);
+  const view = await workbench.render(request, context);
+  expect(JSON.stringify(view.children)).toContain("已完成");
+  expect(JSON.stringify(view.children)).toContain("result run-a");
+});
 
 test("workbench pages saved workflows and opens older drafts within their project", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-pages-"));

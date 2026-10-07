@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, test } from "vitest";
@@ -141,4 +141,48 @@ test("retry keeps completed steps when their former model is unavailable", async
   expect(started).toEqual(["Implement", "Review", "Review"]);
   const view = await workbench.render(request, context);
   expect(JSON.stringify(view.children)).toContain("已完成");
+});
+
+test("an uncertain step can be rerun only after explicit review and keeps its previous session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-uncertain-test-"));
+  roots.push(root);
+  const selection = { profileId: "local", model: "test-model", reasoningEffort: "medium" };
+  await writeFile(join(root, "flows.json"), JSON.stringify({ version: 1, flows: [{
+    id: "flow", projectId: "project", title: "Recover", state: "running", createdAt: 1,
+    steps: [
+      { id: "first", title: "First", instruction: "Do first", state: "running", target: { projectId: "project", sessionId: "old-session", selection }, runId: "old-run" },
+      { id: "second", title: "Second", instruction: "Do second", state: "pending" },
+    ],
+  }] }));
+  let busy = true;
+  let background: Promise<void> | undefined;
+  const started: string[] = [];
+  const host = {
+    storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ conversations: [], models: [{ profileId: "local", name: "Local", models: ["test-model"], efforts: { "test-model": ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, chosen: unknown) => ({ projectId, sessionId, selection: chosen }),
+      prepare: async (target: object) => ({ ...target, sessionId: `new-session-${started.length + 1}` }),
+      startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: `new-run-${started.length}` }; },
+      inspect: async (_target: unknown, runId?: string) => runId === "old-run" ? { busy: false, outcome: "unknown" } : !runId ? { busy, outcome: busy ? "running" : "unknown" } : { busy: false, outcome: "completed" },
+      result: async () => ({ outcome: "completed", text: "done" }),
+    },
+  } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
+  const context = { projectId: "project", sessionId: "parent", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const uncertain = await workbench.render(request, context);
+  expect(JSON.stringify(uncertain.children)).toContain("已核实，重新执行此步骤");
+  await expect(workbench.act({ id: "retry", value: "flow" }, context, request)).rejects.toThrow("结果未能确认");
+  await expect(workbench.act({ id: "rerunUnknown", value: "flow" }, context, request)).rejects.toThrow("状态已变化");
+  busy = false;
+  await workbench.act({ id: "rerunUnknown", value: "flow" }, context, request);
+  await background;
+  expect(started).toEqual(["First", "Second"]);
+  const completed = await workbench.render(request, context);
+  expect(JSON.stringify(completed.children)).toContain("old-session");
+  expect(JSON.stringify(completed.children)).toContain("new-session-1");
+  expect(JSON.stringify(completed.children)).toContain("已完成");
 });

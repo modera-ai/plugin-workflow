@@ -420,7 +420,7 @@ export const activate: PluginModule["activate"] = async host => {
       return { flowId: flow.id, title: flow.title, status: "draft", message: "草稿已保存，等待用户检查并确认执行" };
     } }],
     ui: [{
-      id: "modera.workflow.workbench", slot: "workbench", workbench: { title: "工作流", icon: "network", order: -101 },
+      id: "modera.workflow.workbench", slot: "workbench", frontend: "workbench", workbench: { title: "工作流", icon: "network", order: -101 },
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
       actions: ["create", "showFlow", "showPage", "showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "refresh"], act,
       async render(_request, context) {
@@ -432,7 +432,17 @@ export const activate: PluginModule["activate"] = async host => {
         const page = Math.min(flowPages.get(projectId) ?? 0, Math.max(0, Math.ceil(allFlows.length / 10) - 1));
         const flows = allFlows.slice(page * 10, page * 10 + 10);
         const active = flows.find(item => item.id === selectedFlows.get(projectId)) ?? flows[0];
-        return { title: "工作流", children: [
+        return { title: "工作流", data: {
+          flows: allFlows.map(item => ({ id: item.id, title: item.title, state: item.state, createdAt: item.createdAt, stepCount: item.steps.length })),
+          active: active ? { id: active.id, title: active.title, state: active.state, error: active.error, steps: active.steps.map(step => ({
+            id: step.id, title: step.title, instruction: step.instruction, kind: step.kind ?? "task", state: step.state,
+            dependsOn: dependencies(active, step), selection: step.selection, target: step.target,
+            result: step.result?.slice(0, 1500), previousSessions: step.previousSessions,
+          })) } : undefined,
+          selectedStepId: active ? selectedSteps.get(active.id) : undefined,
+          models: availableModels(available.models).map(item => ({ value: item.value, label: item.label })),
+          outcome: active ? await activeOutcome(active) : undefined,
+        }, children: [
           { type: "text", text: "在聊天输入 /workflow 和你的目标，AI 会先给出可检查的步骤草稿。可改名称、要求、类型及前置步骤；无依赖的任务会并行运行，汇总步骤会等待所有前置步骤完成。执行任务使用独立会话，人工确认步骤会暂停等待你检查。" },
           { type: "text", text: selected?.models[0] ? `默认执行模型：${selected.name} / ${selected.models[0]}` : "执行任务步骤需要配置模型；人工确认步骤不需要。" },
           { type: "button", label: "刷新状态", action: "refresh" },

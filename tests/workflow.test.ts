@@ -351,7 +351,9 @@ test("a join receives every predecessor even when earlier results exceed the han
   expect(saved.flows[0].steps[0].resultTruncated).toBe(true);
   expect(saved.flows[0].steps[0].handoff).toBe("A_SUMMARY with checked files");
   expect(saved.flows[0].steps[0].result).not.toContain("<handoff>");
-  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("此处只显示部分结果");
+  const rendered = await workbench.render(request, context);
+  expect(JSON.stringify(rendered.children)).toContain("此处只显示部分结果");
+  expect(rendered.data?.active.steps[0]).toMatchObject({ handoff: "A_SUMMARY with checked files", handoffPreviewTruncated: false });
 });
 
 test("workflow draft accepts explicit graph edges and rejects cycles before saving", async () => {

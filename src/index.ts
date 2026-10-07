@@ -606,7 +606,8 @@ export const activate: PluginModule["activate"] = async host => {
           active: active ? { id: active.id, title: active.title, state: active.state, error: active.error, steps: active.steps.map(step => ({
             id: step.id, title: step.title, instruction: step.instruction, kind: step.kind ?? "task", state: step.state,
             dependsOn: dependencies(active, step), selection: step.selection, target: step.target, runId: step.runId,
-            result: step.result?.slice(0, 1500), resultTruncated: step.resultTruncated, resultPreviewTruncated: (step.result?.length ?? 0) > 1500, previousSessions: step.previousSessions,
+            result: step.result?.slice(0, 1500), resultTruncated: step.resultTruncated, resultPreviewTruncated: (step.result?.length ?? 0) > 1500,
+            handoff: step.handoff?.slice(0, 1500), handoffPreviewTruncated: (step.handoff?.length ?? 0) > 1500, previousSessions: step.previousSessions,
           })) } : undefined,
           selectedStepId: active ? selectedSteps.get(active.id) : undefined,
           deleteStepId: active ? deleteConfirmations.get(active.id) : undefined,

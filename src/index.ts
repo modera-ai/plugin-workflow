@@ -49,6 +49,7 @@ export const activate: PluginModule["activate"] = async host => {
   if (state.version !== 1 || !Array.isArray(state.flows)) throw new Error("工作流记录格式无效");
   for (const flow of state.flows) if (flow.state === "running") flow.state = "interrupted";
   const selectedFlows = new Map<string, string>();
+  const selectedSteps = new Map<string, string>();
   let queue = Promise.resolve();
   const save = (change: () => void) => {
     const operation = queue.then(async () => {
@@ -66,6 +67,7 @@ export const activate: PluginModule["activate"] = async host => {
     const flow: Flow = { id: randomUUID(), projectId, title: data.title, state: "draft", createdAt: Date.now(), steps: data.steps.map(step => ({ ...step, id: randomUUID(), state: "pending" })) };
     await save(() => { state.flows.unshift(flow); state.flows = state.flows.slice(0, 100); });
     selectedFlows.set(projectId, flow.id);
+    selectedSteps.set(flow.id, flow.steps[0]!.id);
     return flow;
   };
   const find = (projectId: string, id: string) => {
@@ -136,6 +138,14 @@ export const activate: PluginModule["activate"] = async host => {
       host.invalidateUi?.();
       return;
     }
+    if (action.id === "showStep") {
+      const ids = JSON.parse(action.value ?? "{}") as { flowId?: string; stepId?: string };
+      const flow = find(context.projectId, ids.flowId ?? "");
+      if (flow.state !== "draft" || !flow.steps.some(item => item.id === ids.stepId)) throw new Error("当前工作流中找不到可编辑步骤");
+      selectedSteps.set(flow.id, ids.stepId!);
+      host.invalidateUi?.();
+      return;
+    }
     if (action.id === "setStepKind") {
       const envelope = JSON.parse(action.value ?? "{}") as { context?: string; value?: string };
       const ids = JSON.parse(envelope.context ?? "{}") as { flowId?: string; stepId?: string };
@@ -170,19 +180,21 @@ export const activate: PluginModule["activate"] = async host => {
       const flow = find(context.projectId, input.flowId);
       if (flow.state !== "draft") throw new Error("只有草稿可以编辑");
       if (!input.text || input.text.length > (action.id === "editStep" ? 3800 : 120)) throw new Error("请输入有效内容");
+      const addedId = action.id === "addStep" ? randomUUID() : undefined;
       await save(() => {
         if (flow.state !== "draft") throw new Error("草稿状态已变化");
         const index = flow.steps.findIndex(item => item.id === input.stepId);
         if (action.id === "editTitle") flow.title = input.text;
         else if (action.id === "addStep") {
           if (flow.steps.length >= 8) throw new Error("最多 8 个步骤");
-          flow.steps.splice(index < 0 ? flow.steps.length : index + 1, 0, { id: randomUUID(), title: input.text, instruction: `完成${input.text}，并报告完成内容与检查结果。`, state: "pending" });
+          flow.steps.splice(index < 0 ? flow.steps.length : index + 1, 0, { id: addedId!, title: input.text, instruction: `完成${input.text}，并报告完成内容与检查结果。`, state: "pending" });
         } else {
           if (index < 0) throw new Error("找不到该步骤");
           if (action.id === "editStep") flow.steps[index]!.instruction = input.text;
           else flow.steps[index]!.title = input.text;
         }
       });
+      if (addedId) selectedSteps.set(flow.id, addedId);
       return;
     }
     if (["deleteStep", "moveUp", "moveDown"].includes(action.id)) {
@@ -195,6 +207,7 @@ export const activate: PluginModule["activate"] = async host => {
         if (action.id === "deleteStep") {
           if (flow.steps.length <= 2) throw new Error("工作流至少保留 2 个步骤");
           flow.steps.splice(index, 1);
+          if (selectedSteps.get(flow.id) === ids.stepId) selectedSteps.set(flow.id, flow.steps[Math.min(index, flow.steps.length - 1)]!.id);
         } else {
           const next = index + (action.id === "moveUp" ? -1 : 1);
           if (next < 0 || next >= flow.steps.length) throw new Error("步骤已在边界");
@@ -265,16 +278,22 @@ export const activate: PluginModule["activate"] = async host => {
   const nodes = (flow: Flow, models: Models, previousOutcome?: string): PluginUiNode[] => {
     const catalog = availableModels(models);
     const defaultLabel = catalog[0]?.label ?? "未配置模型";
+    const editing = flow.state === "draft" ? flow.steps.find(item => item.id === selectedSteps.get(flow.id)) ?? flow.steps[0] : undefined;
     return [
     { type: "text", text: `${flow.title} · ${flowStates[flow.state]}` },
     ...(flow.state === "draft" ? [{ type: "form" as const, label: "修改工作流名称", placeholder: "工作流名称", initialValue: flow.title, context: JSON.stringify({ flowId: flow.id }), action: "editTitle", maxLength: 120 }] : []),
+    ...(flow.state === "draft" ? [
+      { type: "text" as const, text: "选择要编辑的步骤" },
+      ...flow.steps.map((step, index) => ({ type: "button" as const, label: `${index + 1}. ${step.title.slice(0, 70)} · ${step.kind === "approval" ? "人工确认" : "执行任务"}${step.id === editing?.id ? " ✓" : ""}`, action: "showStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }) })),
+    ] : []),
     ...flow.steps.flatMap((step, index): PluginUiNode[] => {
+      if (flow.state === "draft" && step.id !== editing?.id) return [];
       const displaySelection = ["running", "completed"].includes(step.state) ? step.target?.selection : step.selection;
       const modelLabel = displaySelection ? catalog.find(item => item.value === selectionValue(displaySelection))?.label ?? "当前配置不可用" : defaultLabel;
       const listed = catalog.slice(0, 90);
       const pinned = step.selection ? selectionValue(step.selection) : undefined;
       return [
-      ...(flow.state === "draft" ? [{ type: "text" as const, text: `第 ${index + 1} 步 · ${step.kind === "approval" ? "人工确认" : "执行任务"}` }] : [{ type: "document" as const, label: `${index + 1}. ${step.title} · ${stepStates[step.state]}`, text: `${step.instruction}${step.kind === "approval" ? "\n\n此步由你检查并确认，不会启动 Agent。" : `\n\n模型：${modelLabel}`}${step.result ? `\n\n结果：${step.result.slice(0, 1500)}` : ""}` }]),
+      ...(flow.state === "draft" ? [{ type: "text" as const, text: `编辑第 ${index + 1} 步 · ${step.kind === "approval" ? "人工确认" : "执行任务"}` }] : [{ type: "document" as const, label: `${index + 1}. ${step.title} · ${stepStates[step.state]}`, text: `${step.instruction}${step.kind === "approval" ? "\n\n此步由你检查并确认，不会启动 Agent。" : `\n\n模型：${modelLabel}`}${step.result ? `\n\n结果：${step.result.slice(0, 1500)}` : ""}` }]),
       ...(flow.state === "draft" ? [
         { type: "select" as const, label: "步骤类型", action: "setStepKind", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), value: step.kind ?? "task", options: [{ label: "执行任务（Agent）", value: "task" }, { label: "人工确认（等待你点击继续）", value: "approval" }] },
         { type: "form" as const, label: "步骤名称", placeholder: "简短名称", initialValue: step.title, context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "editStepTitle", maxLength: 120 },
@@ -323,7 +342,7 @@ export const activate: PluginModule["activate"] = async host => {
     ui: [{
       id: "modera.workflow.workbench", slot: "workbench", workbench: { title: "工作流", icon: "network", order: -101 },
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-      actions: ["create", "showFlow", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "refresh"], act,
+      actions: ["create", "showFlow", "showStep", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "refresh"], act,
       async render(_request, context) {
         if (!context.projectId) return { title: "工作流", children: [{ type: "text", text: "请先选择项目。" }] };
         const projectId = context.projectId;
@@ -343,7 +362,7 @@ export const activate: PluginModule["activate"] = async host => {
     }, {
       id: "modera.workflow.result", slot: "tool.result", toolNames: ["workflow_draft"],
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-      actions: ["editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "refresh"], act,
+      actions: ["showStep", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "refresh"], act,
       async render(request, context) {
         if (!context.projectId) return { title: "工作流", children: [] };
         const result = request.tool?.result ? JSON.parse(request.tool.result) as { flowId?: string } : {};

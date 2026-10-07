@@ -44,9 +44,11 @@ test("a model draft waits for user confirmation and then runs native step conver
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   const draft = await workbench.render(request, context);
   const stepForms = draft.children.filter(node => node.type === "form" && node.action === "editStep");
+  expect(stepForms).toHaveLength(1);
   expect(stepForms.every(node => node.type === "form" && node.multiline)).toBe(true);
-  const first = JSON.parse(stepForms[0]!.type === "form" ? stepForms[0]!.context! : "{}") as { stepId: string };
-  const second = JSON.parse(stepForms[1]!.type === "form" ? stepForms[1]!.context! : "{}") as { stepId: string };
+  const stepButtons = draft.children.filter(node => node.type === "button" && node.action === "showStep");
+  const first = JSON.parse(stepButtons[0]!.type === "button" ? stepButtons[0]!.value! : "{}") as { stepId: string };
+  const second = JSON.parse(stepButtons[1]!.type === "button" ? stepButtons[1]!.value! : "{}") as { stepId: string };
   await workbench.act!({ id: "editTitle", value: JSON.stringify({ context: JSON.stringify({ flowId: output.flowId }), text: "Release safely" }) }, context, request);
   await workbench.act!({ id: "addStep", value: JSON.stringify({ context: JSON.stringify({ flowId: output.flowId, stepId: first.stepId }), text: "Review" }) }, context, request);
   let edited = await workbench.render(request, context);
@@ -123,9 +125,11 @@ test("retry keeps completed steps when their former model is unavailable", async
     { title: "Implement", instruction: "Implement feature" }, { title: "Review", instruction: "Review result" },
   ] }, context) as { flowId: string };
   const draft = await workbench.render(request, context);
-  const selectors = draft.children.filter(node => node.type === "select" && node.action === "setModel");
+  const stepButtons = draft.children.filter(node => node.type === "button" && node.action === "showStep");
   for (const [index, model] of ["local-model", "review-model"].entries()) {
-    const selector = selectors[index];
+    if (index) await workbench.act({ id: "showStep", value: stepButtons[index]?.type === "button" ? stepButtons[index].value : undefined }, context, request);
+    const current = await workbench.render(request, context);
+    const selector = current.children.find(node => node.type === "select" && node.action === "setModel");
     if (selector?.type !== "select") throw new Error("Missing model selector");
     const option = selector.options.find(item => item.label.includes(model));
     await workbench.act({ id: "setModel", value: JSON.stringify({ context: selector.context, value: option?.value }) }, context, request);
@@ -215,7 +219,9 @@ test("an approval step pauses after prior work and resumes from persisted state"
     { title: "Deploy", instruction: "Deploy change" },
   ] }, context) as { flowId: string };
   const draft = await workbench.render(request, context);
-  const approvalSelector = draft.children.filter(node => node.type === "select" && node.action === "setStepKind")[1];
+  const secondStep = draft.children.filter(node => node.type === "button" && node.action === "showStep")[1];
+  await workbench.act({ id: "showStep", value: secondStep?.type === "button" ? secondStep.value : undefined }, context, request);
+  const approvalSelector = (await workbench.render(request, context)).children.find(node => node.type === "select" && node.action === "setStepKind");
   if (approvalSelector?.type !== "select") throw new Error("Approval selector missing");
   await workbench.act({ id: "setStepKind", value: JSON.stringify({ context: approvalSelector.context, value: "approval" }) }, context, request);
   const edited = await workbench.render(request, context);

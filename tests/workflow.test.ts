@@ -8,6 +8,23 @@ import { activate } from "../src/index";
 const roots: string[] = [];
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
 
+test("a ten-step draft is accepted and an eleventh step is rejected", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-ten-steps-"));
+  roots.push(root);
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ models: [] }), target() {}, prepare() {}, startRole() {}, inspect() {}, result() {},
+  } } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const tool = contributions?.tools?.[0];
+  if (!tool) throw new Error("Workflow draft tool missing");
+  const steps = Array.from({ length: 10 }, (_, index) => ({ title: `Step ${index + 1}`, instruction: `Do ${index + 1}`, ...(index === 9 ? { after: [1, 2, 3, 4, 5, 6, 7, 8, 9] } : {}) }));
+  await tool.execute({ title: "Ten steps", steps }, context);
+  const saved = JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: unknown[] }[] };
+  expect(saved.flows[0]?.steps).toHaveLength(10);
+  await expect(tool.execute({ title: "Too many", steps: [...steps, { title: "Step 11", instruction: "Do 11" }] }, context)).rejects.toThrow("2–10");
+});
+
 test("opening a restarted workflow restores exact completed nodes and leaves uncertain nodes for review", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-reopen-"));
   roots.push(root);

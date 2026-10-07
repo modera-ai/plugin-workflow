@@ -12,20 +12,20 @@
   "frontends": { "workbench": { "root": "dist/ui", "entry": "index.html" } },
   "permissions": ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
   "extensions": ["workbench", "tool.result"],
-  "agentGuidance": "When the user asks to create a workflow, call workflow_draft with 2–8 concrete steps. For parallel branches or joins, set each step's optional after field to the 1-based numbers of its direct prerequisites; omitted after means the preceding step. Keep the graph acyclic. This only saves a draft. The user reviews and starts it in the workflow card or project workbench; do not execute it yourself.",
+  "agentGuidance": "When the user asks to create a workflow, call workflow_draft with 2–10 concrete steps. For parallel branches or joins, set each step's optional after field to the 1-based numbers of its direct prerequisites; omitted after means the preceding step. Keep the graph acyclic. This only saves a draft. The user reviews and starts it in the workflow card or project workbench; do not execute it yourself.",
   "tools": [{
     "id": "workflow_draft",
     "title": "Draft a workflow",
-    "description": "Save a reviewable 2–8 step workflow draft with optional step dependencies for the current project. No step runs until the user presses Start.",
+    "description": "Save a reviewable 2–10 step workflow draft with optional step dependencies for the current project. No step runs until the user presses Start.",
     "requiredPermissions": ["storage.read", "storage.write"],
     "inputSchema": {
       "type": "object", "additionalProperties": false,
       "properties": {
         "title": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "steps": { "type": "array", "minItems": 2, "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "properties": {
+        "steps": { "type": "array", "minItems": 2, "maxItems": 10, "items": { "type": "object", "additionalProperties": false, "properties": {
           "title": { "type": "string", "minLength": 1, "maxLength": 120 },
           "instruction": { "type": "string", "minLength": 1, "maxLength": 4000 },
-          "after": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 8 } }
+          "after": { "type": "array", "maxItems": 9, "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 10 } }
         }, "required": ["title", "instruction"] } }
       }, "required": ["title", "steps"]
     }

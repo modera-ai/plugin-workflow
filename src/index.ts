@@ -65,14 +65,14 @@ const validateGraph = (flow: Flow) => {
 function validate(raw: unknown): { title: string; steps: { title: string; instruction: string; after?: number[] }[] } {
   if (!raw || typeof raw !== "object") throw new Error("无效的工作流");
   const data = raw as { title?: unknown; steps?: unknown };
-  if (typeof data.title !== "string" || !data.title.trim() || data.title.length > 120 || !Array.isArray(data.steps) || data.steps.length < 2 || data.steps.length > 8)
-    throw new Error("工作流需要标题和 2–8 个步骤");
+  if (typeof data.title !== "string" || !data.title.trim() || data.title.length > 120 || !Array.isArray(data.steps) || data.steps.length < 2 || data.steps.length > 10)
+    throw new Error("工作流需要标题和 2–10 个步骤");
   const stepCount = data.steps.length;
   const steps = data.steps.map(item => {
     const step = item as { title?: unknown; instruction?: unknown; after?: unknown };
     if (!step || typeof step.title !== "string" || !step.title.trim() || step.title.length > 120 || typeof step.instruction !== "string" || !step.instruction.trim() || step.instruction.length > 4000)
       throw new Error("每步需要标题和具体要求");
-    if (step.after !== undefined && (!Array.isArray(step.after) || step.after.length > 8 || step.after.some(value => !Number.isInteger(value) || value < 1 || value > stepCount) || new Set(step.after).size !== step.after.length))
+    if (step.after !== undefined && (!Array.isArray(step.after) || step.after.length > 9 || step.after.some(value => !Number.isInteger(value) || value < 1 || value > stepCount) || new Set(step.after).size !== step.after.length))
       throw new Error("前置步骤须填写有效的不重复步骤序号");
     return { title: step.title.trim(), instruction: step.instruction.trim(), ...(step.after !== undefined ? { after: step.after as number[] } : {}) };
   });
@@ -344,7 +344,7 @@ export const activate: PluginModule["activate"] = async host => {
         const index = flow.steps.findIndex(item => item.id === input.stepId);
         if (action.id === "editTitle") flow.title = input.text;
         else if (action.id === "addStep") {
-          if (flow.steps.length >= 8) throw new Error("最多 8 个步骤");
+          if (flow.steps.length >= 10) throw new Error("最多 10 个步骤");
           if (index < 0) throw new Error("找不到要插入的位置");
           const predecessor = flow.steps[index]!;
           for (const successor of flow.steps) {
@@ -402,7 +402,7 @@ export const activate: PluginModule["activate"] = async host => {
       if (input && (typeof input.title !== "string" || typeof input.steps !== "string")) throw new Error("请填写工作流名称和步骤");
       const stepsText = input ? input.steps as string : action.value;
       const parts = stepsText.split(/[;；→]/).map(item => item.trim()).filter(Boolean);
-      if (parts.length < 2 || parts.length > 8) throw new Error("请用分号分隔 2–8 个步骤");
+      if (parts.length < 2 || parts.length > 10) throw new Error("请用分号分隔 2–10 个步骤");
       await create(context.projectId, { title: input ? input.title as string : parts[0]!.slice(0, 120), steps: parts.map((title, index) => ({ title: title.slice(0, 120), instruction: `执行第 ${index + 1} 步：${title}` })) });
       return;
     }
@@ -553,7 +553,7 @@ export const activate: PluginModule["activate"] = async host => {
             { type: "button" as const, label: "取消删除", action: "cancelDeleteStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }) },
           ] : [{ type: "button" as const, label: "删除步骤", action: "requestDeleteStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), icon: "trash" as const }] : []),
         ] },
-        ...(flow.steps.length < 8 ? [{ type: "form" as const, label: "插入后续步骤（原后续步骤将等待它完成）", placeholder: "新步骤名称", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "addStep", maxLength: 120, submitIcon: "plus" as const }] : []),
+        ...(flow.steps.length < 10 ? [{ type: "form" as const, label: "插入后续步骤（原后续步骤将等待它完成）", placeholder: "新步骤名称", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "addStep", maxLength: 120, submitIcon: "plus" as const }] : []),
       ] : []),
       ...(step.target?.sessionId ? [{ type: "conversation-link" as const, label: "打开步骤会话", sessionId: step.target.sessionId }] : []),
       ...(step.previousSessions ?? []).filter(id => id !== step.target?.sessionId).map(id => ({ type: "conversation-link" as const, label: "打开上次执行会话", sessionId: id })),

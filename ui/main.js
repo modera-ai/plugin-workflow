@@ -79,6 +79,8 @@ function render() {
   if (changedFlow) { selectedFlowId = flow?.id; selectedStepId = data.selectedStepId ?? flow?.steps[0]?.id; }
   if (flow && (changedFlow || changedState) && ["failed", "interrupted"].includes(flow.state))
     selectedStepId = flow.steps.find(step => step.state === "failed" || step.state === "running")?.id ?? selectedStepId;
+  if (flow && (changedFlow || changedState) && flow.state === "paused")
+    selectedStepId = flow.steps.find(step => step.state === "awaitingApproval")?.id ?? selectedStepId;
   selectedFlowState = flow?.state;
   if (flow && !flow.steps.some(item => item.id === selectedStepId)) selectedStepId = flow.steps[0]?.id;
   const theme = snapshot?.theme;

@@ -20,4 +20,12 @@ test("the graph opens the failed node but respects a later manual selection", as
   expect(app.innerHTML).toContain('class="step-card completed selected"');
   expect(app.innerHTML).toContain("给后续步骤的交接摘要");
   expect(app.innerHTML).not.toContain("在原会话继续此步骤");
+  view.data.active.state = "paused";
+  steps[1]!.kind = "approval";
+  steps[1]!.state = "awaitingApproval";
+  runInContext("render()", context);
+  expect(app.innerHTML).toContain('class="step-card awaitingApproval selected"');
+  expect(app.innerHTML).toContain("已检查");
+  runInContext('selectedStepId = "first"; render()', context);
+  expect(app.innerHTML).toContain('class="step-card completed selected"');
 });

@@ -63,6 +63,7 @@ function inspector(flow, data) {
     <div class="section"><h4>前置步骤</h4><p>${escape(prior)}</p></div>
     ${step.kind === "task" && step.state === "pending" && ["paused", "failed", "interrupted"].includes(flow.state) ? modelPicker : ""}
     ${step.result ? `<div class="section"><h4>执行结果预览</h4><div class="result">${escape(step.result)}</div>${step.resultTruncated || step.resultPreviewTruncated ? `<p>此处只显示部分结果，请打开步骤会话查看完整内容。</p>` : ""}</div>` : ""}
+    ${step.handoff ? `<div class="section"><h4>给后续步骤的交接摘要</h4><div class="result">${escape(step.handoff)}</div></div>` : ""}
     ${step.target?.sessionId ? `<div class="actions">${button("打开步骤会话", "openConversation", step.target.sessionId)}</div>` : ""}
     ${flow.state === "failed" && step.state === "failed" && step.target?.sessionId && step.runId ? `<form class="field" data-edit="continueFailed" data-flow="${escape(flow.id)}" data-step="${escape(step.id)}"><label>在原会话继续此步骤</label><textarea maxlength="3800" placeholder="补充失败原因或下一步要求（可留空）"></textarea><button class="button small" type="submit">继续原会话</button></form>` : ""}
     ${(step.previousSessions ?? []).filter(id => id !== step.target?.sessionId).map(id => button("打开上次会话", "openConversation", id)).join("")}

@@ -8,7 +8,7 @@ test("the graph opens the failed node but respects a later manual selection", as
   const context = createContext({ window: { moderaPlugin: api }, document: { getElementById: () => app, documentElement: { style: { setProperty() {} } } } });
   new Script(await readFile(new URL("../ui/main.js", import.meta.url), "utf8")).runInContext(context);
   const steps = [
-    { id: "first", title: "First", instruction: "Do first", kind: "task", state: "completed", dependsOn: [] },
+    { id: "first", title: "First", instruction: "Do first", kind: "task", state: "completed", dependsOn: [], handoff: "Checked files" },
     { id: "failed", title: "Broken step", instruction: "Fix it", kind: "task", state: "failed", dependsOn: ["first"], target: { sessionId: "session" }, runId: "run" },
   ];
   const view = { data: { active: { id: "flow", title: "Flow", state: "failed", steps }, flows: [], outcome: "failed" } };
@@ -18,5 +18,6 @@ test("the graph opens the failed node but respects a later manual selection", as
   expect(app.innerHTML).toContain("在原会话继续此步骤");
   runInContext('selectedStepId = "first"; render()', context);
   expect(app.innerHTML).toContain('class="step-card completed selected"');
+  expect(app.innerHTML).toContain("给后续步骤的交接摘要");
   expect(app.innerHTML).not.toContain("在原会话继续此步骤");
 });

@@ -167,7 +167,9 @@ test("a failed step continues in its original conversation before downstream ste
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   await workbench.act({ id: "continueFailed", value: JSON.stringify({ context: JSON.stringify({ flowId: "flow", stepId: "a" }), text: "Fix the failure" }) }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
   for (let index = 0; index < backgrounds.length; index++) await backgrounds[index];
-  expect(continued).toEqual(["original:failed-run:Fix the failure"]);
+  expect(continued).toHaveLength(1);
+  expect(continued[0]).toContain("original:failed-run:Fix the failure");
+  expect(continued[0]).toContain("<handoff>交接内容</handoff>");
   expect(started).toEqual(["B"]);
   const saved = JSON.parse(await readFile(join(root, "flows.json"), "utf8"));
   expect(saved.flows[0].state).toBe("completed");
@@ -325,7 +327,7 @@ test("a join receives every predecessor even when earlier results exceed the han
       prepare: async (target: object, title: string) => ({ ...target, sessionId: title }),
       startRole: async (_target: unknown, role: { name: string }, prompt: string) => { prompts.set(role.name, prompt); return { runId: role.name }; },
       inspect: async () => ({ outcome: "completed" }),
-      result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: runId === "C" ? `C_SENTINEL${"C".repeat(12000)}` : runId.repeat(12000) }),
+      result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: runId === "A" ? `${"A_LOG".repeat(3000)}<handoff>A_SUMMARY with checked files</handoff>` : runId === "C" ? `C_SENTINEL${"C".repeat(12000)}` : runId.repeat(12000) }),
     },
   } as unknown as PluginContext;
   const contributions = await activate(host);
@@ -340,12 +342,15 @@ test("a join receives every predecessor even when earlier results exceed the han
   await workbench.act({ id: "start", value: created.flowId }, context, request);
   await background;
   const prompt = prompts.get("Join") ?? "";
-  expect(prompt).toContain("A:\n");
+  expect(prompt).toContain("A:\nA_SUMMARY with checked files");
+  expect(prompt).not.toContain("A_LOG");
   expect(prompt).toContain("B:\n");
   expect(prompt).toContain("C:\nC_SENTINEL");
   expect(prompt).toContain("结果已截断");
   const saved = JSON.parse(await readFile(join(root, "flows.json"), "utf8"));
   expect(saved.flows[0].steps[0].resultTruncated).toBe(true);
+  expect(saved.flows[0].steps[0].handoff).toBe("A_SUMMARY with checked files");
+  expect(saved.flows[0].steps[0].result).not.toContain("<handoff>");
   expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("此处只显示部分结果");
 });
 

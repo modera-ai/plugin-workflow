@@ -1,6 +1,6 @@
 const api = window.moderaPlugin;
 const app = document.getElementById("app");
-let snapshot, error = "", busy = false, selectedStepId, selectedFlowId;
+let snapshot, error = "", busy = false, selectedStepId, selectedFlowId, selectedFlowState;
 const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 const attr = value => escape(JSON.stringify(value));
 const labels = { draft: "待确认", running: "运行中", paused: "等待人工确认", completed: "已完成", failed: "失败", interrupted: "需核实", pending: "等待执行", awaitingApproval: "等待你的确认" };
@@ -73,7 +73,12 @@ function inspector(flow, data) {
 function render() {
   const data = snapshot?.view?.data ?? {};
   const flow = data.active;
-  if (flow?.id !== selectedFlowId) { selectedFlowId = flow?.id; selectedStepId = data.selectedStepId ?? flow?.steps[0]?.id; }
+  const changedFlow = flow?.id !== selectedFlowId;
+  const changedState = flow?.state !== selectedFlowState;
+  if (changedFlow) { selectedFlowId = flow?.id; selectedStepId = data.selectedStepId ?? flow?.steps[0]?.id; }
+  if (flow && (changedFlow || changedState) && ["failed", "interrupted"].includes(flow.state))
+    selectedStepId = flow.steps.find(step => step.state === "failed" || step.state === "running")?.id ?? selectedStepId;
+  selectedFlowState = flow?.state;
   if (flow && !flow.steps.some(item => item.id === selectedStepId)) selectedStepId = flow.steps[0]?.id;
   const theme = snapshot?.theme;
   document.documentElement.style.colorScheme = theme?.mode ?? "light";

@@ -58,7 +58,7 @@ test("a model draft waits for user confirmation and then runs native step conver
   await workbench.act!({ id: "deleteStep", value: JSON.stringify({ flowId: output.flowId, stepId: second.stepId }) }, context, request);
   edited = await workbench.render(request, context);
   expect(JSON.stringify(edited.children)).not.toContain("Run checks");
-  const reviewSelect = edited.children.find(node => node.type === "select" && JSON.parse(node.context ?? "{}").stepId === review.stepId);
+  const reviewSelect = edited.children.find(node => node.type === "select" && node.action === "setModel" && JSON.parse(node.context ?? "{}").stepId === review.stepId);
   if (reviewSelect?.type !== "select") throw new Error("Review model selector missing");
   const chosen = reviewSelect.options.find(option => option.label === "Review / review-model");
   expect(chosen).toBeDefined();
@@ -123,7 +123,7 @@ test("retry keeps completed steps when their former model is unavailable", async
     { title: "Implement", instruction: "Implement feature" }, { title: "Review", instruction: "Review result" },
   ] }, context) as { flowId: string };
   const draft = await workbench.render(request, context);
-  const selectors = draft.children.filter(node => node.type === "select");
+  const selectors = draft.children.filter(node => node.type === "select" && node.action === "setModel");
   for (const [index, model] of ["local-model", "review-model"].entries()) {
     const selector = selectors[index];
     if (selector?.type !== "select") throw new Error("Missing model selector");
@@ -184,5 +184,55 @@ test("an uncertain step can be rerun only after explicit review and keeps its pr
   const completed = await workbench.render(request, context);
   expect(JSON.stringify(completed.children)).toContain("old-session");
   expect(JSON.stringify(completed.children)).toContain("new-session-1");
+  expect(JSON.stringify(completed.children)).toContain("已完成");
+});
+
+test("an approval step pauses after prior work and resumes from persisted state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-approval-test-"));
+  roots.push(root);
+  const started: string[] = [];
+  let background: Promise<void> | undefined;
+  const host = {
+    storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ conversations: [], models: [{ profileId: "local", name: "Local", models: ["test-model"], efforts: { "test-model": ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object) => ({ ...target, sessionId: `session-${started.length + 1}` }),
+      startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: `run-${started.length}` }; },
+      inspect: async () => ({ outcome: "completed" }),
+      result: async () => ({ outcome: "completed", text: "verified result" }),
+    },
+  } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render || !contributions.tools?.[0]) throw new Error("Workflow workbench missing");
+  const context = { projectId: "project", sessionId: "parent", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const { flowId } = await contributions.tools[0].execute({ title: "Ship", steps: [
+    { title: "Implement", instruction: "Implement change" },
+    { title: "Check", instruction: "Check the implementation before continuing" },
+    { title: "Deploy", instruction: "Deploy change" },
+  ] }, context) as { flowId: string };
+  const draft = await workbench.render(request, context);
+  const approvalSelector = draft.children.filter(node => node.type === "select" && node.action === "setStepKind")[1];
+  if (approvalSelector?.type !== "select") throw new Error("Approval selector missing");
+  await workbench.act({ id: "setStepKind", value: JSON.stringify({ context: approvalSelector.context, value: "approval" }) }, context, request);
+  const edited = await workbench.render(request, context);
+  expect(JSON.stringify(edited.children)).toContain("保存确认条件");
+  await workbench.act({ id: "start", value: flowId }, context, request);
+  await background;
+  expect(started).toEqual(["Implement"]);
+  const paused = await workbench.render(request, context);
+  expect(JSON.stringify(paused.children)).toContain("等待人工确认");
+  expect(paused.children.some(node => node.type === "button" && node.action === "approveStep")).toBe(true);
+  const restarted = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!restarted?.act || !restarted.render) throw new Error("Restarted workbench missing");
+  await restarted.act({ id: "approveStep", value: flowId }, context, request);
+  await background;
+  expect(started).toEqual(["Implement", "Deploy"]);
+  await expect(restarted.act({ id: "approveStep", value: flowId }, context, request)).rejects.toThrow("未等待确认");
+  const completed = await restarted.render(request, context);
+  expect(JSON.stringify(completed.children)).toContain("用户已确认");
   expect(JSON.stringify(completed.children)).toContain("已完成");
 });

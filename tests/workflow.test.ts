@@ -265,6 +265,25 @@ test("interrupted parallel run recovers every completed node before rerunning un
   expect(JSON.stringify(view.children)).toContain("result run-a");
 });
 
+test("quick draft keeps its workflow name separate from the first step", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-quick-draft-"));
+  roots.push(root);
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ models: [] }), target() {}, prepare() {}, startRole() {}, result() {}, inspect() {},
+  } } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  await workbench.act({ id: "create", value: JSON.stringify({ title: "发布新版本", steps: "安全检查；产品检查" }) }, context, request);
+  const created = (await workbench.render(request, context)).data?.active as { title: string; steps: { title: string }[] };
+  expect(created.title).toBe("发布新版本");
+  expect(created.steps.map(step => step.title)).toEqual(["安全检查", "产品检查"]);
+  await expect(workbench.act({ id: "create", value: JSON.stringify({ title: "", steps: "安全检查；产品检查" }) }, context, request)).rejects.toThrow("标题");
+  await workbench.act({ id: "create", value: "设计；实现" }, context, request);
+  expect((await workbench.render(request, context)).data?.active).toMatchObject({ title: "设计" });
+});
+
 test("workbench pages saved workflows and opens older drafts within their project", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-pages-"));
   roots.push(root);

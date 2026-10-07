@@ -340,9 +340,12 @@ export const activate: PluginModule["activate"] = async host => {
     }
     if (action.id === "create") {
       if (typeof action.value !== "string") throw new Error("请输入步骤");
-      const parts = action.value.split(/[;；→]/).map(item => item.trim()).filter(Boolean);
+      const input = action.value.trimStart().startsWith("{") ? JSON.parse(action.value) as { title?: unknown; steps?: unknown } : undefined;
+      if (input && (typeof input.title !== "string" || typeof input.steps !== "string")) throw new Error("请填写工作流名称和步骤");
+      const stepsText = input ? input.steps as string : action.value;
+      const parts = stepsText.split(/[;；→]/).map(item => item.trim()).filter(Boolean);
       if (parts.length < 2 || parts.length > 8) throw new Error("请用分号分隔 2–8 个步骤");
-      await create(context.projectId, { title: parts[0]!.slice(0, 120), steps: parts.map((title, index) => ({ title: title.slice(0, 120), instruction: `执行第 ${index + 1} 步：${title}` })) });
+      await create(context.projectId, { title: input ? input.title as string : parts[0]!.slice(0, 120), steps: parts.map((title, index) => ({ title: title.slice(0, 120), instruction: `执行第 ${index + 1} 步：${title}` })) });
       return;
     }
     const approval = action.id === "approveStep" && action.value?.startsWith("{") ? JSON.parse(action.value) as { flowId?: string; stepId?: string } : undefined;

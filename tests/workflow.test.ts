@@ -38,6 +38,36 @@ test("opening a restarted workflow restores exact completed nodes and leaves unc
   expect(completed.flows[0].steps[1]).toMatchObject({ state: "completed", result: "Restored run-b" });
 });
 
+test("restart restores a completed parallel task and waits for its approval without retrying", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-approval-restart-"));
+  roots.push(root);
+  await writeFile(join(root, "flows.json"), JSON.stringify({ version: 1, flows: [{
+    id: "flow", projectId: "project", title: "Release", state: "running", createdAt: 1, steps: [
+      { id: "review", title: "Human review", instruction: "Review", kind: "approval", state: "awaitingApproval", dependsOn: [] },
+      { id: "check", title: "Independent check", instruction: "Check", state: "completed", result: "checked", dependsOn: [] },
+      { id: "publish", title: "Publish", instruction: "Publish", state: "pending", selection: { profileId: "missing", model: "old", reasoningEffort: "medium" }, dependsOn: ["review", "check"] },
+    ],
+  }] }));
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
+    target() {}, prepare() {}, startRole() {}, result() {}, inspect() {},
+  } } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const view = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
+  expect(view.data?.active).toMatchObject({ state: "paused" });
+  expect(JSON.stringify(view.children)).toContain("已检查「Human review」，继续工作流");
+  expect(JSON.stringify(view.children)).not.toContain("在新会话重试未完成步骤");
+  expect((JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { state: string }[] }).flows[0]!.state).toBe("paused");
+  const modelSelect = view.children.find(node => node.type === "select" && node.action === "setModel");
+  if (modelSelect?.type !== "select") throw new Error("Paused model selector missing");
+  expect(modelSelect.options.some(option => option.label === "当前选择已不可用")).toBe(true);
+  await workbench.act({ id: "setModel", value: JSON.stringify({ context: modelSelect.context, value: JSON.stringify(["local", "test"]) }) }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
+  const saved = JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: { selection?: { model: string } }[] }[] };
+  expect(saved.flows[0]!.steps[2]!.selection?.model).toBe("test");
+});
+
 test("a replaced run cannot become a completed step through a stale result read or ordinary retry", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-stale-result-"));
   roots.push(root);

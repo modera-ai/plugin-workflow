@@ -104,6 +104,13 @@ export const activate: PluginModule["activate"] = async host => {
     queue = operation.then(() => {}, () => {});
     return operation;
   };
+  const restoredState = (flow: Flow): Flow["state"] | undefined => {
+    if (flow.steps.every(step => step.state === "completed")) return "completed";
+    if (flow.steps.some(step => step.state === "failed")) return "failed";
+    if (flow.steps.some(step => step.state === "awaitingApproval") && !flow.steps.some(step => step.state === "running") &&
+      flow.steps.filter(step => step.state === "pending").every(step => dependencies(flow, step).some(id => flow.steps.find(item => item.id === id)?.state !== "completed"))) return "paused";
+    return undefined;
+  };
   const reconcileFlow = async (flow: Flow) => {
     if (flow.state !== "interrupted" && flow.state !== "failed") return;
     const updates: { step: Step; state: "completed" | "failed"; result?: string; truncated?: boolean; outcome: string }[] = [];
@@ -118,7 +125,7 @@ export const activate: PluginModule["activate"] = async host => {
         }
       } catch { /* Keep uncertain nodes visible for manual verification. */ }
     }
-    if (!updates.length) return;
+    if (!updates.length && (flow.state !== "interrupted" || !restoredState(flow))) return;
     await save(() => {
       for (const update of updates) {
         if (update.step.state !== "running") continue;
@@ -127,8 +134,8 @@ export const activate: PluginModule["activate"] = async host => {
         else flow.error = `${update.step.title}：${update.outcome}`;
       }
       if (flow.state === "interrupted") {
-        if (flow.steps.every(step => step.state === "completed")) { flow.state = "completed"; flow.error = undefined; }
-        else if (flow.steps.some(step => step.state === "failed")) flow.state = "failed";
+        const restored = restoredState(flow);
+        if (restored) { flow.state = restored; if (restored !== "failed") flow.error = undefined; }
       }
     });
   };
@@ -289,12 +296,12 @@ export const activate: PluginModule["activate"] = async host => {
       const ids = JSON.parse(envelope.context ?? "{}") as { flowId?: string; stepId?: string };
       const flow = find(context.projectId, ids.flowId ?? "");
       const step = flow.steps.find(item => item.id === ids.stepId);
-      if (!step || step.kind === "approval" || !["draft", "failed", "interrupted"].includes(flow.state) || !["pending", "failed"].includes(step.state)) throw new Error("此步骤当前不能修改模型");
+      if (!step || step.kind === "approval" || !["draft", "paused", "failed", "interrupted"].includes(flow.state) || !["pending", "failed"].includes(step.state)) throw new Error("此步骤当前不能修改模型");
       const models = availableModels((await host.scheduling!.options!(flow.projectId)).models);
       const selection = envelope.value === "default" ? undefined : models.find(item => item.value === envelope.value)?.selection;
       if (envelope.value !== "default" && !selection) throw new Error("所选模型已不可用");
       await save(() => {
-        if (step.kind === "approval" || !["draft", "failed", "interrupted"].includes(flow.state) || !["pending", "failed"].includes(step.state)) throw new Error("步骤状态已变化");
+        if (step.kind === "approval" || !["draft", "paused", "failed", "interrupted"].includes(flow.state) || !["pending", "failed"].includes(step.state)) throw new Error("步骤状态已变化");
         step.selection = selection;
       });
       return;
@@ -486,7 +493,7 @@ export const activate: PluginModule["activate"] = async host => {
         { type: "form" as const, label: "步骤名称", placeholder: "简短名称", initialValue: step.title, context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "editStepTitle", maxLength: 120 },
         { type: "form" as const, label: step.kind === "approval" ? "保存确认条件" : "保存本步要求", placeholder: step.kind === "approval" ? "写清需要检查什么，以及何时可以继续" : "写清本步目标和完成条件", initialValue: step.instruction, context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "editStep", maxLength: 3800, multiline: true },
       ] : []),
-      ...(step.kind !== "approval" && ["draft", "failed", "interrupted"].includes(flow.state) && ["pending", "failed"].includes(step.state) ? [{
+      ...(step.kind !== "approval" && ["draft", "paused", "failed", "interrupted"].includes(flow.state) && ["pending", "failed"].includes(step.state) ? [{
         type: "select" as const, label: "本步执行模型", action: "setModel", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), value: pinned ?? "default",
         options: [{ label: `默认：${defaultLabel}`, value: "default" }, ...listed.map(item => ({ label: item.label, value: item.value })), ...(pinned && !listed.some(item => item.value === pinned) ? [{ label: catalog.find(item => item.value === pinned)?.label ?? "当前选择已不可用", value: pinned }] : [])],
       }] : []),

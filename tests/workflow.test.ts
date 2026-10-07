@@ -377,7 +377,14 @@ test("inserting a step makes former successors wait and deleting it restores the
   expect(inserted[2]!.dependsOn).toEqual([inserted[1]!.id]);
   expect(inserted[3]!.dependsOn).toEqual([inserted[1]!.id]);
   expect(inserted[4]!.dependsOn).toEqual([original[1]!.id, original[2]!.id]);
-  await workbench.act({ id: "deleteStep", value: JSON.stringify({ flowId: created.flowId, stepId: inserted[1]!.id }) }, context, request);
+  const deletion = JSON.stringify({ flowId: created.flowId, stepId: inserted[1]!.id });
+  await expect(workbench.act({ id: "deleteStep", value: deletion }, context, request)).rejects.toThrow("先查看删除影响");
+  await workbench.act({ id: "requestDeleteStep", value: deletion }, context, request);
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("2 个直接后续步骤将改为依赖它的前置步骤");
+  await workbench.act({ id: "cancelDeleteStep", value: deletion }, context, request);
+  await expect(workbench.act({ id: "deleteStep", value: deletion }, context, request)).rejects.toThrow("先查看删除影响");
+  await workbench.act({ id: "requestDeleteStep", value: deletion }, context, request);
+  await workbench.act({ id: "deleteStep", value: deletion }, context, request);
   const restored = await readSteps();
   expect(restored[1]!.dependsOn).toEqual([original[0]!.id]);
   expect(restored[2]!.dependsOn).toEqual([original[0]!.id]);
@@ -461,6 +468,7 @@ test("a model draft waits for user confirmation and then runs native step conver
   const reviewForm = edited.children.find(node => node.type === "form" && node.action === "editStepTitle" && node.initialValue === "Review");
   const review = JSON.parse(reviewForm?.type === "form" ? reviewForm.context! : "{}") as { stepId: string };
   await workbench.act!({ id: "moveDown", value: JSON.stringify({ flowId: output.flowId, stepId: review.stepId }) }, context, request);
+  await workbench.act!({ id: "requestDeleteStep", value: JSON.stringify({ flowId: output.flowId, stepId: second.stepId }) }, context, request);
   await workbench.act!({ id: "deleteStep", value: JSON.stringify({ flowId: output.flowId, stepId: second.stepId }) }, context, request);
   edited = await workbench.render(request, context);
   expect(JSON.stringify(edited.children)).not.toContain("Run checks");

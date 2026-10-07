@@ -91,6 +91,7 @@ export const activate: PluginModule["activate"] = async host => {
   for (const flow of state.flows) if (flow.state === "running") flow.state = "interrupted";
   const selectedFlows = new Map<string, string>();
   const selectedSteps = new Map<string, string>();
+  const deleteConfirmations = new Map<string, string>();
   const flowPages = new Map<string, number>();
   let queue = Promise.resolve();
   const save = (change: () => void) => {
@@ -334,9 +335,23 @@ export const activate: PluginModule["activate"] = async host => {
       if (addedId) selectedSteps.set(flow.id, addedId);
       return;
     }
+    if (["requestDeleteStep", "cancelDeleteStep"].includes(action.id)) {
+      const ids = JSON.parse(action.value ?? "{}") as { flowId?: string; stepId?: string };
+      const flow = find(context.projectId, ids.flowId ?? "");
+      if (flow.state !== "draft") throw new Error("只有草稿可以删除步骤");
+      if (action.id === "cancelDeleteStep") deleteConfirmations.delete(flow.id);
+      else {
+        if (flow.steps.length <= 2) throw new Error("工作流至少保留 2 个步骤");
+        if (!flow.steps.some(item => item.id === ids.stepId)) throw new Error("找不到该步骤");
+        deleteConfirmations.set(flow.id, ids.stepId!);
+      }
+      host.invalidateUi?.();
+      return;
+    }
     if (["deleteStep", "moveUp", "moveDown"].includes(action.id)) {
       const ids = JSON.parse(action.value ?? "{}") as { flowId?: string; stepId?: string };
       const flow = find(context.projectId, ids.flowId ?? "");
+      if (action.id === "deleteStep" && deleteConfirmations.get(flow.id) !== ids.stepId) throw new Error("请先查看删除影响并确认");
       await save(() => {
         if (flow.state !== "draft") throw new Error("只有草稿可以编辑");
         materializeDependencies(flow);
@@ -353,6 +368,7 @@ export const activate: PluginModule["activate"] = async host => {
           [flow.steps[index], flow.steps[next]] = [flow.steps[next]!, flow.steps[index]!];
         }
       });
+      if (action.id === "deleteStep") deleteConfirmations.delete(flow.id);
       return;
     }
     if (action.id === "create") {
@@ -499,10 +515,14 @@ export const activate: PluginModule["activate"] = async host => {
       }] : []),
       ...(flow.state === "draft" ? [
         { type: "text" as const, text: "上下移动只调整显示位置；执行先后由上方前置步骤决定。" },
+        ...(deleteConfirmations.get(flow.id) === step.id ? [{ type: "text" as const, text: `确认删除「${step.title}」？${flow.steps.filter(item => dependencies(flow, item).includes(step.id)).length} 个直接后续步骤将改为依赖它的前置步骤。` }] : []),
         { type: "row" as const, children: [
           ...(index > 0 ? [{ type: "button" as const, label: "上移显示位置", action: "moveUp", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
           ...(index < flow.steps.length - 1 ? [{ type: "button" as const, label: "下移显示位置", action: "moveDown", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
-          ...(flow.steps.length > 2 ? [{ type: "button" as const, label: "删除步骤", action: "deleteStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), icon: "trash" as const, quiet: true }] : []),
+          ...(flow.steps.length > 2 ? deleteConfirmations.get(flow.id) === step.id ? [
+            { type: "button" as const, label: "确认删除步骤", action: "deleteStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), icon: "trash" as const },
+            { type: "button" as const, label: "取消删除", action: "cancelDeleteStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }) },
+          ] : [{ type: "button" as const, label: "删除步骤", action: "requestDeleteStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), icon: "trash" as const }] : []),
         ] },
         ...(flow.steps.length < 8 ? [{ type: "form" as const, label: "插入后续步骤（原后续步骤将等待它完成）", placeholder: "新步骤名称", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "addStep", maxLength: 120, submitIcon: "plus" as const }] : []),
       ] : []),
@@ -538,7 +558,7 @@ export const activate: PluginModule["activate"] = async host => {
     ui: [{
       id: "modera.workflow.workbench", slot: "workbench", frontend: "workbench", workbench: { title: "工作流", icon: "network", order: -101 },
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-      actions: ["create", "showFlow", "showPage", "showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "continueFailed", "refresh"], act,
+      actions: ["create", "showFlow", "showPage", "showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "requestDeleteStep", "cancelDeleteStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "continueFailed", "refresh"], act,
       async render(_request, context) {
         if (!context.projectId) return { title: "工作流", children: [{ type: "text", text: "请先选择项目。" }] };
         const projectId = context.projectId;
@@ -558,6 +578,7 @@ export const activate: PluginModule["activate"] = async host => {
             result: step.result?.slice(0, 1500), resultTruncated: step.resultTruncated, resultPreviewTruncated: (step.result?.length ?? 0) > 1500, previousSessions: step.previousSessions,
           })) } : undefined,
           selectedStepId: active ? selectedSteps.get(active.id) : undefined,
+          deleteStepId: active ? deleteConfirmations.get(active.id) : undefined,
           models: availableModels(available.models).map(item => ({ value: item.value, label: item.label })),
           outcome: active ? await activeOutcome(active) : undefined,
         }, children: [
@@ -576,7 +597,7 @@ export const activate: PluginModule["activate"] = async host => {
     }, {
       id: "modera.workflow.result", slot: "tool.result", toolNames: ["workflow_draft"],
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-      actions: ["showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "continueFailed", "refresh"], act,
+      actions: ["showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "requestDeleteStep", "cancelDeleteStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "continueFailed", "refresh"], act,
       async render(request, context) {
         if (!context.projectId) return { title: "工作流", children: [] };
         const result = request.tool?.result ? JSON.parse(request.tool.result) as { flowId?: string } : {};

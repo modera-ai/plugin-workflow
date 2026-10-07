@@ -59,7 +59,7 @@ function inspector(flow, data) {
     ${step.target?.sessionId ? `<div class="actions">${button("打开步骤会话", "openConversation", step.target.sessionId)}</div>` : ""}
     ${flow.state === "failed" && step.state === "failed" && step.target?.sessionId && step.runId ? `<form class="field" data-edit="continueFailed" data-flow="${escape(flow.id)}" data-step="${escape(step.id)}"><label>在原会话继续此步骤</label><textarea maxlength="3800" placeholder="补充失败原因或下一步要求（可留空）"></textarea><button class="button small" type="submit">继续原会话</button></form>` : ""}
     ${(step.previousSessions ?? []).filter(id => id !== step.target?.sessionId).map(id => button("打开上次会话", "openConversation", id)).join("")}
-    ${flow.state === "paused" && step.state === "awaitingApproval" ? `<div class="actions">${button("已检查，继续", "approveStep", flow.id, "primary")}</div>` : ""}`}
+    ${flow.state === "paused" && step.state === "awaitingApproval" ? `<div class="actions">${button(`已检查「${step.title}」，继续`, "approveStep", JSON.stringify({ flowId: flow.id, stepId: step.id }), "primary")}</div>` : ""}`}
   </aside>`;
 }
 

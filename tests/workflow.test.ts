@@ -479,6 +479,55 @@ test("an uncertain step can be rerun only after explicit review and keeps its pr
   expect(JSON.stringify(completed.children)).toContain("已完成");
 });
 
+test("parallel approval buttons confirm only their own step", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-parallel-approval-"));
+  roots.push(root);
+  await writeFile(join(root, "flows.json"), JSON.stringify({ version: 1, flows: [{
+    id: "flow", projectId: "project", title: "Release", state: "paused", createdAt: Date.now(), steps: [
+      { id: "security", title: "Security review", instruction: "Check security", kind: "approval", state: "awaitingApproval", dependsOn: [] },
+      { id: "product", title: "Product review", instruction: "Check product", kind: "approval", state: "awaitingApproval", dependsOn: [] },
+      { id: "release", title: "Release", instruction: "Release after both reviews", kind: "task", state: "pending", dependsOn: ["security", "product"] },
+    ],
+  }] }));
+  const started: string[] = [];
+  let background: Promise<void> | undefined;
+  const host = {
+    storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ conversations: [], models: [{ profileId: "local", name: "Local", models: ["test-model"], efforts: { "test-model": ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object) => ({ ...target, sessionId: "release-session" }),
+      startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: "release-run" }; },
+      inspect: async () => ({ outcome: "completed" }),
+      result: async () => ({ outcome: "completed", text: "released" }),
+    },
+  } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const paused = await workbench.render(request, context);
+  const approvals = paused.children.filter(node => node.type === "button" && node.action === "approveStep");
+  expect(approvals).toHaveLength(2);
+  const product = approvals.find(node => node.type === "button" && node.label.includes("Product review"));
+  if (product?.type !== "button") throw new Error("Product approval missing");
+  await expect(workbench.act({ id: "approveStep", value: "flow" }, context, request)).rejects.toThrow("指定");
+  await expect(workbench.act({ id: "approveStep", value: JSON.stringify({ flowId: "flow", stepId: "release" }) }, context, request)).rejects.toThrow("未等待确认");
+  await workbench.act({ id: "approveStep", value: product.value }, context, request);
+  await background;
+  expect(started).toEqual([]);
+  const afterProduct = (await workbench.render(request, context)).data?.active as { state: string; steps: { id: string; state: string }[] };
+  expect(afterProduct.state).toBe("paused");
+  expect(afterProduct.steps.find(step => step.id === "product")?.state).toBe("completed");
+  expect(afterProduct.steps.find(step => step.id === "security")?.state).toBe("awaitingApproval");
+  const remaining = (await workbench.render(request, context)).children.find(node => node.type === "button" && node.action === "approveStep");
+  await workbench.act({ id: "approveStep", value: remaining?.type === "button" ? remaining.value : undefined }, context, request);
+  await background;
+  expect(started).toEqual(["Release"]);
+  expect((await workbench.render(request, context)).data?.active).toMatchObject({ state: "completed" });
+});
+
 test("an approval step pauses after prior work and resumes from persisted state", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-approval-test-"));
   roots.push(root);
@@ -519,10 +568,11 @@ test("an approval step pauses after prior work and resumes from persisted state"
   expect(started).toEqual(["Implement"]);
   const paused = await workbench.render(request, context);
   expect(JSON.stringify(paused.children)).toContain("等待人工确认");
-  expect(paused.children.some(node => node.type === "button" && node.action === "approveStep")).toBe(true);
+  const approval = paused.children.find(node => node.type === "button" && node.action === "approveStep");
+  expect(approval?.type === "button" ? JSON.parse(approval.value ?? "{}") : undefined).toMatchObject({ flowId });
   const restarted = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
   if (!restarted?.act || !restarted.render) throw new Error("Restarted workbench missing");
-  await restarted.act({ id: "approveStep", value: flowId }, context, request);
+  await restarted.act({ id: "approveStep", value: approval?.type === "button" ? approval.value : undefined }, context, request);
   await background;
   expect(started).toEqual(["Implement", "Deploy"]);
   await expect(restarted.act({ id: "approveStep", value: flowId }, context, request)).rejects.toThrow("未等待确认");

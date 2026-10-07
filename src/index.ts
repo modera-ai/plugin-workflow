@@ -309,7 +309,12 @@ export const activate: PluginModule["activate"] = async host => {
         if (action.id === "editTitle") flow.title = input.text;
         else if (action.id === "addStep") {
           if (flow.steps.length >= 8) throw new Error("最多 8 个步骤");
-          flow.steps.splice(index < 0 ? flow.steps.length : index + 1, 0, { id: addedId!, title: input.text, instruction: `完成${input.text}，并报告完成内容与检查结果。`, dependsOn: index < 0 ? [] : [flow.steps[index]!.id], state: "pending" });
+          if (index < 0) throw new Error("找不到要插入的位置");
+          const predecessor = flow.steps[index]!;
+          for (const successor of flow.steps) {
+            if (successor.dependsOn?.includes(predecessor.id)) successor.dependsOn = successor.dependsOn.map(id => id === predecessor.id ? addedId! : id);
+          }
+          flow.steps.splice(index + 1, 0, { id: addedId!, title: input.text, instruction: `完成${input.text}，并报告完成内容与检查结果。`, dependsOn: [predecessor.id], state: "pending" });
         } else {
           if (index < 0) throw new Error("找不到该步骤");
           if (action.id === "editStep") flow.steps[index]!.instruction = input.text;
@@ -488,7 +493,7 @@ export const activate: PluginModule["activate"] = async host => {
           ...(index < flow.steps.length - 1 ? [{ type: "button" as const, label: "下移", action: "moveDown", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
           ...(flow.steps.length > 2 ? [{ type: "button" as const, label: "删除步骤", action: "deleteStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), icon: "trash" as const, quiet: true }] : []),
         ] },
-        ...(flow.steps.length < 8 ? [{ type: "form" as const, label: "在此步后添加", placeholder: "新步骤名称", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "addStep", maxLength: 120, submitIcon: "plus" as const }] : []),
+        ...(flow.steps.length < 8 ? [{ type: "form" as const, label: "插入后续步骤（原后续步骤将等待它完成）", placeholder: "新步骤名称", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "addStep", maxLength: 120, submitIcon: "plus" as const }] : []),
       ] : []),
       ...(step.target?.sessionId ? [{ type: "conversation-link" as const, label: "打开步骤会话", sessionId: step.target.sessionId }] : []),
       ...(step.previousSessions ?? []).filter(id => id !== step.target?.sessionId).map(id => ({ type: "conversation-link" as const, label: "打开上次执行会话", sessionId: id })),

@@ -322,6 +322,38 @@ test("workbench pages saved workflows and opens older drafts within their projec
   await expect(workbench.act({ id: "showPage", value: "3" }, context, request)).rejects.toThrow("页码无效");
 });
 
+test("inserting a step makes former successors wait and deleting it restores their dependencies", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-insert-"));
+  roots.push(root);
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ models: [] }), target() {}, prepare() {}, startRole() {}, result() {}, inspect() {},
+  } } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const created = await contributions?.tools?.[0]?.execute({ title: "Release", steps: [
+    { title: "Build", instruction: "Build", after: [] },
+    { title: "Verify", instruction: "Verify", after: [1] },
+    { title: "Publish", instruction: "Publish", after: [1] },
+    { title: "Join", instruction: "Join", after: [2, 3] },
+  ] }, context) as { flowId: string };
+  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act) throw new Error("Workflow workbench missing");
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const readSteps = async () => (JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: { id: string; dependsOn: string[] }[] }[] }).flows[0]!.steps;
+  const original = await readSteps();
+  await workbench.act({ id: "addStep", value: JSON.stringify({ context: JSON.stringify({ flowId: created.flowId, stepId: original[0]!.id }), text: "Review" }) }, context, request);
+  const inserted = await readSteps();
+  expect(inserted[1]!.dependsOn).toEqual([original[0]!.id]);
+  expect(inserted[2]!.dependsOn).toEqual([inserted[1]!.id]);
+  expect(inserted[3]!.dependsOn).toEqual([inserted[1]!.id]);
+  expect(inserted[4]!.dependsOn).toEqual([original[1]!.id, original[2]!.id]);
+  await workbench.act({ id: "deleteStep", value: JSON.stringify({ flowId: created.flowId, stepId: inserted[1]!.id }) }, context, request);
+  const restored = await readSteps();
+  expect(restored[1]!.dependsOn).toEqual([original[0]!.id]);
+  expect(restored[2]!.dependsOn).toEqual([original[0]!.id]);
+  expect(restored[3]!.dependsOn).toEqual([original[1]!.id, original[2]!.id]);
+});
+
 test("creating a workflow keeps the oldest record after one hundred entries and a restart", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-retention-"));
   roots.push(root);

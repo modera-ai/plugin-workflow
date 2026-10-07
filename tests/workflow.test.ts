@@ -197,9 +197,9 @@ test("independent workflow steps start together and a join waits for both result
   expect(started[2]).toBe("Join");
   expect(prompts.get("A")).not.toContain("前序步骤结果");
   expect(prompts.get("B")).not.toContain("前序步骤结果");
-  expect(prompts.get("A")).toContain("同批并行步骤也使用当前项目工作目录：B");
-  expect(prompts.get("B")).toContain("同批并行步骤也使用当前项目工作目录：A");
-  expect(prompts.get("Join")).not.toContain("同批并行步骤");
+  expect(prompts.get("A")).toContain("同时运行的其他步骤也使用当前项目工作目录：B");
+  expect(prompts.get("B")).toContain("同时运行的其他步骤也使用当前项目工作目录：A");
+  expect(prompts.get("Join")).not.toContain("同时运行的其他步骤");
   expect(rolePrompts.get("A")).toContain("使用同一项目工作目录");
   expect(prompts.get("Join")).toContain("A:\nresult A");
   expect(prompts.get("Join")).toContain("B:\nresult B");
@@ -207,6 +207,92 @@ test("independent workflow steps start together and a join waits for both result
   expect(JSON.stringify(view.children)).toContain("已完成");
   expect(JSON.stringify(view.children)).toContain("前置步骤：A、B");
   expect(JSON.stringify(view.children)).toContain("可能修改同一文件的步骤请设置前置依赖");
+});
+
+test("a downstream step starts when its own prerequisite finishes while a sibling remains running", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-rolling-dag-"));
+  roots.push(root);
+  const started: string[] = [];
+  const prompts = new Map<string, string>();
+  let slowFinished = false;
+  let background: Promise<void> | undefined;
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object, title: string) => ({ ...target, sessionId: title }),
+      startRole: async (_target: unknown, role: { name: string }, prompt: string) => { started.push(role.name); prompts.set(role.name, prompt); return { runId: role.name }; },
+      inspect: async (_target: unknown, runId: string) => ({ outcome: runId === "Slow B" && !slowFinished ? "running" : "completed" }),
+      result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: `${runId} done` }),
+    },
+  } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const created = await contributions?.tools?.[0]?.execute({ title: "Rolling", steps: [
+    { title: "Fast A", instruction: "Do A", after: [] },
+    { title: "Slow B", instruction: "Do B", after: [] },
+    { title: "After A", instruction: "Do C", after: [1] },
+    { title: "Join", instruction: "Combine", after: [2, 3] },
+  ] }, context) as { flowId: string };
+  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  await workbench.act({ id: "start", value: created.flowId }, context, request);
+  try {
+    for (let attempt = 0; attempt < 50 && !started.includes("After A"); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    expect(started).toContain("After A");
+    expect(started).not.toContain("Join");
+    expect(prompts.get("After A")).toContain("同时运行的其他步骤也使用当前项目工作目录：Slow B");
+  } finally {
+    slowFinished = true;
+    await background;
+  }
+  expect(started).toEqual(["Fast A", "Slow B", "After A", "Join"]);
+  expect((await workbench.render(request, context)).data?.active).toMatchObject({ state: "completed" });
+});
+
+test("confirming an approval wakes its successor before an unrelated task finishes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-approval-wake-"));
+  roots.push(root);
+  const started: string[] = [];
+  let slowFinished = false;
+  let background: Promise<void> | undefined;
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object, title: string) => ({ ...target, sessionId: title }),
+      startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: role.name }; },
+      inspect: async (_target: unknown, runId: string) => ({ outcome: runId === "Slow task" && !slowFinished ? "running" : "completed" }),
+      result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: `${runId} done` }),
+    },
+  } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const created = await contributions?.tools?.[0]?.execute({ title: "Approval wake", steps: [
+    { title: "Review", instruction: "Confirm", after: [] },
+    { title: "Slow task", instruction: "Slow", after: [] },
+    { title: "After review", instruction: "Continue", after: [1] },
+  ] }, context) as { flowId: string };
+  const stepId = (JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: { id: string }[] }[] }).flows[0]!.steps[0]!.id;
+  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  await workbench.act({ id: "setStepKind", value: JSON.stringify({ context: JSON.stringify({ flowId: created.flowId, stepId }), value: "approval" }) }, context, request);
+  await workbench.act({ id: "start", value: created.flowId }, context, request);
+  try {
+    for (let attempt = 0; attempt < 50 && !started.includes("Slow task"); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    expect(started).toContain("Slow task");
+    await workbench.act({ id: "approveStep", value: JSON.stringify({ flowId: created.flowId, stepId }) }, context, request);
+    for (let attempt = 0; attempt < 50 && !started.includes("After review"); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    expect(started).toContain("After review");
+  } finally {
+    slowFinished = true;
+    await background;
+  }
+  expect((await workbench.render(request, context)).data?.active).toMatchObject({ state: "completed" });
 });
 
 test("a join receives every predecessor even when earlier results exceed the handoff budget", async () => {

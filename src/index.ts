@@ -93,6 +93,7 @@ export const activate: PluginModule["activate"] = async host => {
   const selectedSteps = new Map<string, string>();
   const deleteConfirmations = new Map<string, string>();
   const flowPages = new Map<string, number>();
+  const activeRuns = new Map<string, { version: number; wake?: () => void }>();
   let queue = Promise.resolve();
   const save = (change: () => void) => {
     const operation = queue.then(async () => {
@@ -162,6 +163,8 @@ export const activate: PluginModule["activate"] = async host => {
     return result;
   };
   const run = (flow: Flow, context: ToolContext) => {
+    const channel: { version: number; wake?: () => void } = { version: 0 };
+    activeRuns.set(flow.id, channel);
     host.runBackground!({ ...context, label: `工作流：${flow.title}` }, async backgroundSignal => {
       const signal = AbortSignal.any([backgroundSignal, host.scopeSignal?.(flow.projectId) ?? host.signal]);
       try {
@@ -176,7 +179,7 @@ export const activate: PluginModule["activate"] = async host => {
           if (pinned && !catalog.some(item => item.value === selectionValue(pinned))) throw new Error(`${step.title}：所选模型已不可用，请重新选择`);
           const selection = pinned ?? defaultSelection!;
           const previous = handoff(flow, step);
-          const parallel = peers.length > 1 ? `\n\n同批并行步骤也使用当前项目工作目录：${peers.filter(item => item.id !== step.id).map(item => item.title).join("、")}。先检查实际文件状态；避免覆盖其他步骤正在修改的文件。若发现冲突，停止并报告，不要擅自丢弃改动。` : "";
+          const parallel = peers.length > 1 ? `\n\n同时运行的其他步骤也使用当前项目工作目录：${peers.filter(item => item.id !== step.id).map(item => item.title).join("、")}。先检查实际文件状态；避免覆盖其他步骤正在修改的文件。若发现冲突，停止并报告，不要擅自丢弃改动。` : "";
           await save(() => {
             if (step.target?.sessionId && step.runId) step.previousSessions = [...new Set([...(step.previousSessions ?? []), step.target.sessionId])].slice(-5);
             step.state = "running"; step.result = undefined; step.resultTruncated = undefined; step.target = undefined; step.runId = undefined; flow.error = undefined;
@@ -205,34 +208,55 @@ export const activate: PluginModule["activate"] = async host => {
             });
           }
         };
-        while (flow.steps.some(step => step.state !== "completed")) {
+        type JobResult = { step: Step; ok: true } | { step: Step; ok: false; error: unknown };
+        const inFlight = new Map<string, Promise<JobResult>>();
+        while (flow.steps.some(step => step.state !== "completed") || inFlight.size) {
           signal.throwIfAborted();
-          if (flow.steps.some(step => step.state === "awaitingApproval")) {
-            await save(() => { if (flow.steps.some(step => step.state === "awaitingApproval")) { flow.state = "paused"; flow.error = undefined; } });
-            if (flow.state === "paused") return;
+          if (flow.steps.some(step => step.state === "failed")) {
+            const outcomes = await Promise.all(inFlight.values());
+            const failure = outcomes.find(item => !item.ok);
+            throw failure && !failure.ok ? failure.error : new Error("工作流步骤执行失败");
           }
-          const ready = flow.steps.filter(step => step.state !== "completed" && dependencies(flow, step).every(id => flow.steps.find(item => item.id === id)?.state === "completed"));
-          if (!ready.length) throw new Error("工作流没有可运行步骤，请检查依赖和失败步骤状态");
+          const observedVersion = channel.version;
+          const ready = flow.steps.filter(step => step.state === "pending" && !inFlight.has(step.id) && dependencies(flow, step).every(id => flow.steps.find(item => item.id === id)?.state === "completed"));
           const approvals = ready.filter(step => step.kind === "approval");
           if (approvals.length) {
             await save(() => { for (const step of approvals) step.state = "awaitingApproval"; flow.error = undefined; });
           }
           const peerTasks = ready.filter(step => step.kind !== "approval");
-          if (!peerTasks.length) {
-            await save(() => { if (flow.steps.some(step => step.state === "awaitingApproval")) flow.state = "paused"; });
-            if (flow.state === "paused") return;
-            continue;
+          const concurrentTasks = [...flow.steps.filter(step => inFlight.has(step.id) && step.state !== "completed"), ...peerTasks];
+          for (const step of peerTasks) {
+            const job = executeStep(step, concurrentTasks).then((): JobResult => ({ step, ok: true }), async (error): Promise<JobResult> => {
+              await save(() => { step.state = "failed"; });
+              return { step, ok: false, error };
+            });
+            inFlight.set(step.id, job);
           }
-          const outcomes = await Promise.allSettled(peerTasks.map(async step => {
-            try { await executeStep(step, peerTasks); }
-            catch (error) { await save(() => { step.state = "failed"; }); throw error; }
-          }));
-          const failure = outcomes.find(item => item.status === "rejected");
-          if (failure?.status === "rejected") throw failure.reason;
+          if (!inFlight.size) {
+            if (flow.steps.every(step => step.state === "completed")) break;
+            if (flow.steps.some(step => step.state === "awaitingApproval")) {
+              await save(() => { if (flow.steps.some(step => step.state === "awaitingApproval")) { flow.state = "paused"; flow.error = undefined; } });
+              if (flow.state === "paused") return;
+              continue;
+            }
+            throw new Error("工作流没有可运行步骤，请检查依赖和失败步骤状态");
+          }
+          if (channel.version !== observedVersion) continue;
+          const wake = new Promise<undefined>(resolve => { channel.wake = () => resolve(undefined); });
+          const settled = await Promise.race([...inFlight.values(), wake]);
+          channel.wake = undefined;
+          if (!settled) continue;
+          inFlight.delete(settled.step.id);
+          if (!settled.ok) {
+            await Promise.allSettled(inFlight.values());
+            throw settled.error;
+          }
         }
         await save(() => { flow.state = "completed"; });
       } catch (error) {
         await save(() => { flow.state = "failed"; flow.error = String(error); });
+      } finally {
+        if (activeRuns.get(flow.id) === channel) activeRuns.delete(flow.id);
       }
     });
   };
@@ -404,6 +428,7 @@ export const activate: PluginModule["activate"] = async host => {
         if (resume) flow.state = "running";
       });
       if (resume) try { run(flow, context); } catch (error) { await save(() => { flow.state = "failed"; flow.error = String(error); }); throw error; }
+      else { const channel = activeRuns.get(flow.id); if (channel) { channel.version++; channel.wake?.(); } }
     } else if (action.id === "start") {
       if (flow.state !== "draft") throw new Error("只有草稿可以开始");
       validateGraph(flow);

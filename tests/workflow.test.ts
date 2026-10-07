@@ -111,11 +111,48 @@ test("independent workflow steps start together and a join waits for both result
   expect(started[2]).toBe("Join");
   expect(prompts.get("A")).not.toContain("前序步骤结果");
   expect(prompts.get("B")).not.toContain("前序步骤结果");
-  expect(prompts.get("Join")).toContain("A: result A");
-  expect(prompts.get("Join")).toContain("B: result B");
+  expect(prompts.get("Join")).toContain("A:\nresult A");
+  expect(prompts.get("Join")).toContain("B:\nresult B");
   const view = await workbench.render(request, context);
   expect(JSON.stringify(view.children)).toContain("已完成");
   expect(JSON.stringify(view.children)).toContain("前置步骤：A、B");
+});
+
+test("a join receives every predecessor even when earlier results exceed the handoff budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-handoff-"));
+  roots.push(root);
+  let background: Promise<void> | undefined;
+  const prompts = new Map<string, string>();
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object, title: string) => ({ ...target, sessionId: title }),
+      startRole: async (_target: unknown, role: { name: string }, prompt: string) => { prompts.set(role.name, prompt); return { runId: role.name }; },
+      inspect: async () => ({ outcome: "completed" }),
+      result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: runId === "C" ? `C_SENTINEL${"C".repeat(12000)}` : runId.repeat(12000) }),
+    },
+  } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render || !contributions?.tools) throw new Error("Workflow contributions missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const created = await contributions.tools[0]!.execute({ title: "Join", steps: [
+    { title: "A", instruction: "A", after: [] }, { title: "B", instruction: "B", after: [] },
+    { title: "C", instruction: "C", after: [] }, { title: "Join", instruction: "Combine all", after: [1, 2, 3] },
+  ] }, context) as { flowId: string };
+  await workbench.act({ id: "start", value: created.flowId }, context, request);
+  await background;
+  const prompt = prompts.get("Join") ?? "";
+  expect(prompt).toContain("A:\n");
+  expect(prompt).toContain("B:\n");
+  expect(prompt).toContain("C:\nC_SENTINEL");
+  expect(prompt).toContain("结果已截断");
+  const saved = JSON.parse(await readFile(join(root, "flows.json"), "utf8"));
+  expect(saved.flows[0].steps[0].resultTruncated).toBe(true);
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("此处只显示部分结果");
 });
 
 test("workflow draft accepts explicit graph edges and rejects cycles before saving", async () => {

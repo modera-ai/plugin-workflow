@@ -6,7 +6,7 @@ import manifest from "../plugin.json";
 
 type Selection = ScheduledRunTarget["selection"];
 type Models = Awaited<ReturnType<NonNullable<NonNullable<PluginContext["scheduling"]>["options"]>>>["models"];
-type Step = { id: string; title: string; instruction: string; dependsOn?: string[]; kind?: "task" | "approval"; state: "pending" | "running" | "awaitingApproval" | "completed" | "failed"; selection?: Selection; target?: ScheduledRunTarget; runId?: string; result?: string; previousSessions?: string[] };
+type Step = { id: string; title: string; instruction: string; dependsOn?: string[]; kind?: "task" | "approval"; state: "pending" | "running" | "awaitingApproval" | "completed" | "failed"; selection?: Selection; target?: ScheduledRunTarget; runId?: string; result?: string; resultTruncated?: boolean; previousSessions?: string[] };
 type Flow = { id: string; projectId: string; title: string; state: "draft" | "running" | "paused" | "completed" | "failed" | "interrupted"; steps: Step[]; createdAt: number; error?: string };
 type State = { version: 1; flows: Flow[] };
 const flowStates: Record<Flow["state"], string> = { draft: "待确认", running: "运行中", paused: "等待人工确认", completed: "已完成", failed: "失败", interrupted: "需核实" };
@@ -27,6 +27,22 @@ const formValue = (value?: string): { flowId: string; stepId?: string; text: str
 const dependencies = (flow: Flow, step: Step) => step.dependsOn
   ? [...step.dependsOn].sort((left, right) => flow.steps.findIndex(item => item.id === left) - flow.steps.findIndex(item => item.id === right))
   : (flow.steps.indexOf(step) ? [flow.steps[flow.steps.indexOf(step) - 1]!.id] : []);
+const completeStep = (step: Step, result: { text: string; truncated?: boolean }) => {
+  step.state = "completed";
+  step.result = result.text.slice(0, 10000);
+  step.resultTruncated = !!result.truncated || result.text.length > 10000;
+};
+const handoff = (flow: Flow, step: Step) => {
+  const parents = dependencies(flow, step).map(id => flow.steps.find(item => item.id === id)!);
+  if (!parents.length) return "";
+  // Reserve space for every direct predecessor, including the last parallel branch.
+  const perResult = Math.floor(18000 / parents.length);
+  return parents.map(parent => {
+    const result = parent.result ?? "";
+    const clipped = result.length > perResult || parent.resultTruncated;
+    return `${parent.title}:\n${result.slice(0, perResult) || "（无结果文本）"}${clipped ? "\n[此节点结果已截断，请打开对应步骤会话查看完整内容]" : ""}`;
+  }).join("\n\n");
+};
 const materializeDependencies = (flow: Flow) => { for (const step of flow.steps) step.dependsOn = [...dependencies(flow, step)]; };
 const validateGraph = (flow: Flow) => {
   const byId = new Map(flow.steps.map(step => [step.id, step]));
@@ -90,13 +106,13 @@ export const activate: PluginModule["activate"] = async host => {
   };
   const reconcileFlow = async (flow: Flow) => {
     if (flow.state !== "interrupted" && flow.state !== "failed") return;
-    const updates: { step: Step; state: "completed" | "failed"; result?: string; outcome: string }[] = [];
+    const updates: { step: Step; state: "completed" | "failed"; result?: string; truncated?: boolean; outcome: string }[] = [];
     for (const step of flow.steps.filter(item => item.state === "running" && item.target && item.runId)) {
       try {
         const status = await host.scheduling!.inspect(step.target!, step.runId!);
         if (status.outcome === "completed") {
           const result = await host.scheduling!.result!(step.target!, step.runId!);
-          if (result.outcome === "completed") updates.push({ step, state: "completed", result: result.text.slice(0, 10000), outcome: "completed" });
+          if (result.outcome === "completed") updates.push({ step, state: "completed", result: result.text, truncated: result.truncated, outcome: "completed" });
         } else if (status.outcome === "failed" || status.outcome === "cancelled") {
           updates.push({ step, state: "failed", outcome: status.outcome });
         }
@@ -107,7 +123,7 @@ export const activate: PluginModule["activate"] = async host => {
       for (const update of updates) {
         if (update.step.state !== "running") continue;
         update.step.state = update.state;
-        if (update.state === "completed") update.step.result = update.result;
+        if (update.state === "completed") completeStep(update.step, { text: update.result ?? "", truncated: update.truncated });
         else flow.error = `${update.step.title}：${update.outcome}`;
       }
       if (flow.state === "interrupted") {
@@ -146,10 +162,10 @@ export const activate: PluginModule["activate"] = async host => {
           const pinned = step.selection;
           if (pinned && !catalog.some(item => item.value === selectionValue(pinned))) throw new Error(`${step.title}：所选模型已不可用，请重新选择`);
           const selection = pinned ?? defaultSelection!;
-          const previous = dependencies(flow, step).map(id => flow.steps.find(item => item.id === id)!).map(item => `${item.title}: ${item.result ?? ""}`).join("\n\n").slice(0, 20000);
+          const previous = handoff(flow, step);
           await save(() => {
             if (step.target?.sessionId && step.runId) step.previousSessions = [...new Set([...(step.previousSessions ?? []), step.target.sessionId])].slice(-5);
-            step.state = "running"; step.result = undefined; step.target = undefined; step.runId = undefined; flow.error = undefined;
+            step.state = "running"; step.result = undefined; step.resultTruncated = undefined; step.target = undefined; step.runId = undefined; flow.error = undefined;
           });
           const target = await host.scheduling!.prepare!(await host.scheduling!.target!(flow.projectId, "", selection), `${flow.title} · ${step.title}`, true,
             { taskId: step.id, workbenchId: "modera.workflow.workbench", conversationMode: "native" });
@@ -164,7 +180,7 @@ export const activate: PluginModule["activate"] = async host => {
             const status = await host.scheduling!.inspect(target, started.runId);
             if (status.outcome === "completed") {
               const result = await host.scheduling!.result!(target, started.runId);
-              await save(() => { step.state = "completed"; step.result = result.text.slice(0, 10000); });
+              await save(() => { completeStep(step, result); });
               break;
             }
             if (!["running"].includes(status.outcome)) throw new Error(`${step.title}：${status.outcome}`);
@@ -373,7 +389,7 @@ export const activate: PluginModule["activate"] = async host => {
               const current = await host.scheduling!.inspect(target, started.runId);
               if (current.outcome === "completed") {
                 const result = await host.scheduling!.result!(target, started.runId);
-                await save(() => { step.state = "completed"; step.result = result.text.slice(0, 10000); });
+                await save(() => { completeStep(step, result); });
                 if (flow.steps.some(item => item.state === "failed")) {
                   await save(() => { flow.state = "failed"; flow.error = "还有失败步骤需要逐一处理。"; });
                   return;
@@ -404,7 +420,7 @@ export const activate: PluginModule["activate"] = async host => {
       } else if (uncertain.length) throw new Error("上次步骤结果未能确认，请先打开会话核实，避免重复执行");
       for (const item of inspected.filter(item => item.status.outcome === "completed")) {
         const result = await host.scheduling!.result!(item.step.target!, item.step.runId!);
-        await save(() => { item.step.state = "completed"; item.step.result = result.text.slice(0, 10000); });
+        await save(() => { completeStep(item.step, result); });
       }
       const catalog = availableModels((await host.scheduling!.options!(flow.projectId)).models);
       if (!catalog.length && flow.steps.some(step => step.state !== "completed" && step.kind !== "approval")) throw new Error("请先配置可用模型");
@@ -441,7 +457,7 @@ export const activate: PluginModule["activate"] = async host => {
       const listed = catalog.slice(0, 90);
       const pinned = step.selection ? selectionValue(step.selection) : undefined;
       return [
-      ...(flow.state === "draft" ? [{ type: "text" as const, text: `编辑第 ${index + 1} 步 · ${step.kind === "approval" ? "人工确认" : "执行任务"}` }] : [{ type: "document" as const, label: `${index + 1}. ${step.title} · ${flow.state === "interrupted" && step.state === "running" ? "待核实" : stepStates[step.state]}`, text: `${step.instruction}${step.kind === "approval" ? "\n\n此步由你检查并确认，不会启动 Agent。" : `\n\n模型：${modelLabel}`}${step.result ? `\n\n结果：${step.result.slice(0, 1500)}` : ""}` }]),
+      ...(flow.state === "draft" ? [{ type: "text" as const, text: `编辑第 ${index + 1} 步 · ${step.kind === "approval" ? "人工确认" : "执行任务"}` }] : [{ type: "document" as const, label: `${index + 1}. ${step.title} · ${flow.state === "interrupted" && step.state === "running" ? "待核实" : stepStates[step.state]}`, text: `${step.instruction}${step.kind === "approval" ? "\n\n此步由你检查并确认，不会启动 Agent。" : `\n\n模型：${modelLabel}`}${step.result ? `\n\n结果预览：${step.result.slice(0, 1500)}` : ""}${step.resultTruncated || (step.result?.length ?? 0) > 1500 ? "\n\n此处只显示部分结果，请打开步骤会话查看完整内容。" : ""}` }]),
       { type: "text", text: `前置步骤：${dependencies(flow, step).map(id => flow.steps.find(item => item.id === id)?.title ?? "无效步骤").join("、") || "无（可立即开始）"}` },
       ...(flow.state === "draft" ? [
         ...flow.steps.filter(item => item.id !== step.id).map(item => ({ type: "button" as const, label: `${dependencies(flow, step).includes(item.id) ? "✓ " : "+ "}依赖「${item.title.slice(0, 50)}」`, action: "toggleDependency", value: JSON.stringify({ flowId: flow.id, stepId: step.id, prerequisiteId: item.id }), quiet: true })),
@@ -509,7 +525,7 @@ export const activate: PluginModule["activate"] = async host => {
           active: active ? { id: active.id, title: active.title, state: active.state, error: active.error, steps: active.steps.map(step => ({
             id: step.id, title: step.title, instruction: step.instruction, kind: step.kind ?? "task", state: step.state,
             dependsOn: dependencies(active, step), selection: step.selection, target: step.target, runId: step.runId,
-            result: step.result?.slice(0, 1500), previousSessions: step.previousSessions,
+            result: step.result?.slice(0, 1500), resultTruncated: step.resultTruncated, resultPreviewTruncated: (step.result?.length ?? 0) > 1500, previousSessions: step.previousSessions,
           })) } : undefined,
           selectedStepId: active ? selectedSteps.get(active.id) : undefined,
           models: availableModels(available.models).map(item => ({ value: item.value, label: item.label })),

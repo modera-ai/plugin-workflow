@@ -133,6 +133,7 @@ test("independent workflow steps start together and a join waits for both result
   roots.push(root);
   const started: string[] = [];
   const prompts = new Map<string, string>();
+  const rolePrompts = new Map<string, string>();
   let releasePair!: () => void;
   const pair = new Promise<void>(resolve => { releasePair = resolve; });
   let background: Promise<void> | undefined;
@@ -142,7 +143,7 @@ test("independent workflow steps start together and a join waits for both result
       options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
       target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
       prepare: async (target: object, title: string) => ({ ...target, sessionId: title }),
-      startRole: async (_target: unknown, role: { name: string }, prompt: string) => { prompts.set(role.name, prompt); started.push(role.name); if (started.length === 2) releasePair(); if (role.name !== "Join") await pair; return { runId: role.name }; },
+      startRole: async (_target: unknown, role: { name: string; prompt: string }, prompt: string) => { prompts.set(role.name, prompt); rolePrompts.set(role.name, role.prompt); started.push(role.name); if (started.length === 2) releasePair(); if (role.name !== "Join") await pair; return { runId: role.name }; },
       inspect: async () => ({ outcome: "completed" }), result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: `result ${runId}` }),
     },
   } as unknown as PluginContext;
@@ -166,11 +167,16 @@ test("independent workflow steps start together and a join waits for both result
   expect(started[2]).toBe("Join");
   expect(prompts.get("A")).not.toContain("前序步骤结果");
   expect(prompts.get("B")).not.toContain("前序步骤结果");
+  expect(prompts.get("A")).toContain("同批并行步骤也使用当前项目工作目录：B");
+  expect(prompts.get("B")).toContain("同批并行步骤也使用当前项目工作目录：A");
+  expect(prompts.get("Join")).not.toContain("同批并行步骤");
+  expect(rolePrompts.get("A")).toContain("使用同一项目工作目录");
   expect(prompts.get("Join")).toContain("A:\nresult A");
   expect(prompts.get("Join")).toContain("B:\nresult B");
   const view = await workbench.render(request, context);
   expect(JSON.stringify(view.children)).toContain("已完成");
   expect(JSON.stringify(view.children)).toContain("前置步骤：A、B");
+  expect(JSON.stringify(view.children)).toContain("可能修改同一文件的步骤请设置前置依赖");
 });
 
 test("a join receives every predecessor even when earlier results exceed the handoff budget", async () => {

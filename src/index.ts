@@ -50,6 +50,7 @@ export const activate: PluginModule["activate"] = async host => {
   for (const flow of state.flows) if (flow.state === "running") flow.state = "interrupted";
   const selectedFlows = new Map<string, string>();
   const selectedSteps = new Map<string, string>();
+  const flowPages = new Map<string, number>();
   let queue = Promise.resolve();
   const save = (change: () => void) => {
     const operation = queue.then(async () => {
@@ -67,6 +68,7 @@ export const activate: PluginModule["activate"] = async host => {
     const flow: Flow = { id: randomUUID(), projectId, title: data.title, state: "draft", createdAt: Date.now(), steps: data.steps.map(step => ({ ...step, id: randomUUID(), state: "pending" })) };
     await save(() => { state.flows.unshift(flow); state.flows = state.flows.slice(0, 100); });
     selectedFlows.set(projectId, flow.id);
+    flowPages.set(projectId, 0);
     selectedSteps.set(flow.id, flow.steps[0]!.id);
     return flow;
   };
@@ -135,6 +137,15 @@ export const activate: PluginModule["activate"] = async host => {
     if (action.id === "showFlow") {
       find(context.projectId, action.value ?? "");
       selectedFlows.set(context.projectId, action.value!);
+      host.invalidateUi?.();
+      return;
+    }
+    if (action.id === "showPage") {
+      const count = state.flows.filter(item => item.projectId === context.projectId).length;
+      const page = Number(action.value);
+      if (!Number.isInteger(page) || page < 0 || page >= Math.ceil(count / 10)) throw new Error("工作流页码无效");
+      flowPages.set(context.projectId, page);
+      selectedFlows.delete(context.projectId);
       host.invalidateUi?.();
       return;
     }
@@ -342,20 +353,26 @@ export const activate: PluginModule["activate"] = async host => {
     ui: [{
       id: "modera.workflow.workbench", slot: "workbench", workbench: { title: "工作流", icon: "network", order: -101 },
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-      actions: ["create", "showFlow", "showStep", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "refresh"], act,
+      actions: ["create", "showFlow", "showPage", "showStep", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "refresh"], act,
       async render(_request, context) {
         if (!context.projectId) return { title: "工作流", children: [{ type: "text", text: "请先选择项目。" }] };
         const projectId = context.projectId;
         const available = await host.scheduling!.options!(projectId);
         const selected = available.models[0];
-        const flows = state.flows.filter(item => item.projectId === projectId).slice(0, 20);
+        const allFlows = state.flows.filter(item => item.projectId === projectId);
+        const page = Math.min(flowPages.get(projectId) ?? 0, Math.max(0, Math.ceil(allFlows.length / 10) - 1));
+        const flows = allFlows.slice(page * 10, page * 10 + 10);
         const active = flows.find(item => item.id === selectedFlows.get(projectId)) ?? flows[0];
         return { title: "工作流", children: [
           { type: "text", text: "在聊天输入 /workflow 和你的目标，AI 会先给出步骤草稿。可改名称、要求、类型和步骤顺序，也可增删步骤；执行任务使用独立会话，人工确认步骤会暂停等待你检查。" },
           { type: "text", text: selected?.models[0] ? `默认执行模型：${selected.name} / ${selected.models[0]}` : "执行任务步骤需要配置模型；人工确认步骤不需要。" },
           { type: "button", label: "刷新状态", action: "refresh" },
-          ...(flows.length ? [{ type: "text" as const, text: "选择工作流" }] : []),
+          ...(flows.length ? [{ type: "text" as const, text: `选择工作流 · ${allFlows.length} 项 · 第 ${page + 1}/${Math.ceil(allFlows.length / 10)} 页` }] : []),
           ...flows.map(item => ({ type: "button" as const, label: `${item.title.slice(0, 60)} · ${flowStates[item.state]}${item.id === active?.id ? " ✓" : ""}`, action: "showFlow", value: item.id })),
+          ...(allFlows.length > 10 ? [{ type: "row" as const, children: [
+            ...(page > 0 ? [{ type: "button" as const, label: "上一页", action: "showPage", value: String(page - 1) }] : []),
+            ...(page < Math.ceil(allFlows.length / 10) - 1 ? [{ type: "button" as const, label: "下一页", action: "showPage", value: String(page + 1) }] : []),
+          ] }] : []),
           ...(active ? nodes(active, available.models, await activeOutcome(active)) : []),
         ] };
       },

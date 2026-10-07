@@ -8,6 +8,34 @@ import { activate } from "../src/index";
 const roots: string[] = [];
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
 
+test("workbench pages saved workflows and opens older drafts within their project", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-pages-"));
+  roots.push(root);
+  await writeFile(join(root, "flows.json"), JSON.stringify({ version: 1, flows: Array.from({ length: 23 }, (_, index) => ({
+    id: `flow-${index + 1}`, projectId: "project", title: `Flow ${index + 1}`, state: "draft", createdAt: index,
+    steps: [{ id: `a-${index}`, title: `First ${index + 1}`, instruction: "First", state: "pending" }, { id: `b-${index}`, title: "Second", instruction: "Second", state: "pending" }],
+  })) }));
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ models: [] }), target() {}, prepare() {}, startRole() {}, result() {}, inspect() {},
+  } } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const first = await workbench.render(request, context);
+  expect(first.children.filter(node => node.type === "button" && node.action === "showFlow")).toHaveLength(10);
+  expect(JSON.stringify(first.children)).toContain("Flow 1");
+  expect(JSON.stringify(first.children)).not.toContain("Flow 23");
+  await workbench.act({ id: "showPage", value: "2" }, context, request);
+  const last = await workbench.render(request, context);
+  expect(last.children.filter(node => node.type === "button" && node.action === "showFlow")).toHaveLength(3);
+  expect(JSON.stringify(last.children)).toContain("Flow 21");
+  await workbench.act({ id: "showFlow", value: "flow-23" }, context, request);
+  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("First 23");
+  await expect(workbench.act({ id: "showFlow", value: "flow-23" }, { ...context, projectId: "other" }, request)).rejects.toThrow("找不到");
+  await expect(workbench.act({ id: "showPage", value: "3" }, context, request)).rejects.toThrow("页码无效");
+});
+
 test("a model draft waits for user confirmation and then runs native step conversations in order", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-test-"));
   roots.push(root);

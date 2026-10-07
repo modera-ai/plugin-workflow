@@ -280,11 +280,15 @@ test("workbench pages saved workflows and opens older drafts within their projec
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   const first = await workbench.render(request, context);
+  expect(first.data).toMatchObject({ page: 0, pageCount: 3, totalFlows: 23 });
+  expect((first.data as { flows: unknown[] }).flows).toHaveLength(10);
   expect(first.children.filter(node => node.type === "button" && node.action === "showFlow")).toHaveLength(10);
   expect(JSON.stringify(first.children)).toContain("Flow 1");
   expect(JSON.stringify(first.children)).not.toContain("Flow 23");
   await workbench.act({ id: "showPage", value: "2" }, context, request);
   const last = await workbench.render(request, context);
+  expect(last.data).toMatchObject({ page: 2, pageCount: 3, totalFlows: 23 });
+  expect((last.data as { flows: { id: string }[] }).flows.map(item => item.id)).toEqual(["flow-21", "flow-22", "flow-23"]);
   expect(last.children.filter(node => node.type === "button" && node.action === "showFlow")).toHaveLength(3);
   expect(JSON.stringify(last.children)).toContain("Flow 21");
   await workbench.act({ id: "showFlow", value: "flow-23" }, context, request);

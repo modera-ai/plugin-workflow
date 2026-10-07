@@ -526,7 +526,8 @@ export const activate: PluginModule["activate"] = async host => {
         await Promise.all(flows.map(reconcileFlow));
         const active = flows.find(item => item.id === selectedFlows.get(projectId)) ?? flows[0];
         return { title: "工作流", data: {
-          flows: allFlows.map(item => ({ id: item.id, title: item.title, state: item.state, createdAt: item.createdAt, stepCount: item.steps.length })),
+          flows: flows.map(item => ({ id: item.id, title: item.title, state: item.state, createdAt: item.createdAt, stepCount: item.steps.length })),
+          page, pageCount: Math.max(1, Math.ceil(allFlows.length / 10)), totalFlows: allFlows.length,
           active: active ? { id: active.id, title: active.title, state: active.state, error: active.error, steps: active.steps.map(step => ({
             id: step.id, title: step.title, instruction: step.instruction, kind: step.kind ?? "task", state: step.state,
             dependsOn: dependencies(active, step), selection: step.selection, target: step.target, runId: step.runId,

@@ -211,6 +211,9 @@ export const activate: PluginModule["activate"] = async host => {
           await save(() => { active.state = "completed"; active.result = result.text.slice(0, 10000); });
         }
       }
+      const catalog = availableModels((await host.scheduling!.options!(flow.projectId)).models);
+      if (!catalog.length) throw new Error("请先配置可用模型");
+      for (const step of flow.steps) if (step.state !== "completed" && step.selection && !catalog.some(item => item.value === selectionValue(step.selection!))) throw new Error(`${step.title}：所选模型已不可用，请重新选择`);
       await save(() => { flow.state = "running"; for (const item of flow.steps) if (item.state !== "completed") item.state = "pending"; });
       try { run(flow, context); } catch (error) { await save(() => { flow.state = "failed"; flow.error = String(error); }); throw error; }
     } else throw new Error("不支持的工作流操作");
@@ -249,7 +252,8 @@ export const activate: PluginModule["activate"] = async host => {
     }),
     ...(flow.error ? [{ type: "text" as const, text: flow.error }] : []),
     ...(flow.state === "draft" ? [{ type: "button" as const, label: "确认并开始", action: "start", value: flow.id }] : []),
-    ...(["failed", "interrupted"].includes(flow.state) ? [{ type: "button" as const, label: "继续未完成步骤", action: "retry", value: flow.id }] : []),
+    ...(["failed", "interrupted"].includes(flow.state) ? [{ type: "text" as const, text: "继续前会核实上次步骤的结果；无法确认时会停止并请你打开步骤会话检查。已完成步骤不会重跑。" }] : []),
+    ...(["failed", "interrupted"].includes(flow.state) ? [{ type: "button" as const, label: "核实并继续未完成步骤", action: "retry", value: flow.id }] : []),
   ];
   };
   return {

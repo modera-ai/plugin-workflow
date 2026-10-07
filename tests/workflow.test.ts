@@ -87,3 +87,58 @@ test("a model draft waits for user confirmation and then runs native step conver
   expect(JSON.stringify(switched.children)).not.toContain("Draft note");
   expect(another.flowId).not.toBe(output.flowId);
 });
+
+test("retry keeps completed steps when their former model is unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-retry-test-"));
+  roots.push(root);
+  let localEnabled = true;
+  let failedOnce = false;
+  let background: Promise<void> | undefined;
+  const models = () => [
+    ...(localEnabled ? [{ profileId: "local", name: "Local", models: ["local-model"], efforts: { "local-model": ["medium"] } }] : []),
+    { profileId: "review", name: "Review", models: ["review-model"], efforts: { "review-model": ["high"] } },
+  ];
+  const started: string[] = [];
+  const host = {
+    storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ conversations: [], models: models() }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object) => ({ ...target, sessionId: `session-${started.length + 1}` }),
+      startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: `run-${started.length}` }; },
+      inspect: async (_target: unknown, runId: string) => {
+        if (runId === "run-2" && !failedOnce) { failedOnce = true; return { outcome: "failed" }; }
+        return { outcome: "completed" };
+      },
+      result: async () => ({ outcome: "completed", text: "done" }),
+    },
+  } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act || !workbench.render || !contributions.tools?.[0]) throw new Error("Workflow workbench missing");
+  const context = { projectId: "project", sessionId: "parent", signal: host.signal } as ToolContext;
+  const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
+  const { flowId } = await contributions.tools[0].execute({ title: "Check", steps: [
+    { title: "Implement", instruction: "Implement feature" }, { title: "Review", instruction: "Review result" },
+  ] }, context) as { flowId: string };
+  const draft = await workbench.render(request, context);
+  const selectors = draft.children.filter(node => node.type === "select");
+  for (const [index, model] of ["local-model", "review-model"].entries()) {
+    const selector = selectors[index];
+    if (selector?.type !== "select") throw new Error("Missing model selector");
+    const option = selector.options.find(item => item.label.includes(model));
+    await workbench.act({ id: "setModel", value: JSON.stringify({ context: selector.context, value: option?.value }) }, context, request);
+  }
+  await workbench.act({ id: "start", value: flowId }, context, request);
+  await background;
+  expect(started).toEqual(["Implement", "Review"]);
+  const failedView = await workbench.render(request, context);
+  expect(JSON.stringify(failedView.children)).toContain("已完成步骤不会重跑");
+  localEnabled = false;
+  await workbench.act({ id: "retry", value: flowId }, context, request);
+  await background;
+  expect(started).toEqual(["Implement", "Review", "Review"]);
+  const view = await workbench.render(request, context);
+  expect(JSON.stringify(view.children)).toContain("已完成");
+});

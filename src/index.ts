@@ -148,6 +148,11 @@ export const activate: PluginModule["activate"] = async host => {
     if (!flow) throw new Error("当前项目中找不到该工作流");
     return flow;
   };
+  const completedResult = async (target: ScheduledRunTarget, runId: string) => {
+    const result = await host.scheduling!.result!(target, runId);
+    if (result.outcome !== "completed") throw new Error("步骤运行结果已变化或无法确认，请打开步骤会话核实，避免重复执行");
+    return result;
+  };
   const run = (flow: Flow, context: ToolContext) => {
     host.runBackground!({ ...context, label: `工作流：${flow.title}` }, async backgroundSignal => {
       const signal = AbortSignal.any([backgroundSignal, host.scopeSignal?.(flow.projectId) ?? host.signal]);
@@ -179,7 +184,7 @@ export const activate: PluginModule["activate"] = async host => {
             signal.throwIfAborted();
             const status = await host.scheduling!.inspect(target, started.runId);
             if (status.outcome === "completed") {
-              const result = await host.scheduling!.result!(target, started.runId);
+              const result = await completedResult(target, started.runId);
               await save(() => { completeStep(step, result); });
               break;
             }
@@ -388,7 +393,7 @@ export const activate: PluginModule["activate"] = async host => {
               signal.throwIfAborted();
               const current = await host.scheduling!.inspect(target, started.runId);
               if (current.outcome === "completed") {
-                const result = await host.scheduling!.result!(target, started.runId);
+                const result = await completedResult(target, started.runId);
                 await save(() => { completeStep(step, result); });
                 if (flow.steps.some(item => item.state === "failed")) {
                   await save(() => { flow.state = "failed"; flow.error = "还有失败步骤需要逐一处理。"; });
@@ -409,7 +414,7 @@ export const activate: PluginModule["activate"] = async host => {
       } catch (error) { await save(() => { step.state = "failed"; flow.state = "failed"; flow.error = String(error); }); throw error; }
     } else if (action.id === "retry" || action.id === "rerunUnknown") {
       if (!["failed", "interrupted"].includes(flow.state)) throw new Error("工作流当前不可继续");
-      const active = flow.steps.filter(item => item.state === "running");
+      const active = flow.steps.filter(item => item.state === "running" || (item.state === "failed" && !!item.target));
       if (active.some(item => !item.target || !item.runId)) throw new Error("步骤启动结果无法确认，请先打开会话核实");
       const inspected = await Promise.all(active.map(async step => ({ step, status: await host.scheduling!.inspect(step.target!, step.runId!) })));
       if (inspected.some(item => item.status.outcome === "running" || item.status.busy)) throw new Error("上次步骤仍在运行，请先打开会话确认");
@@ -419,7 +424,7 @@ export const activate: PluginModule["activate"] = async host => {
           throw new Error("上次步骤状态已变化，请刷新并重新核实");
       } else if (uncertain.length) throw new Error("上次步骤结果未能确认，请先打开会话核实，避免重复执行");
       for (const item of inspected.filter(item => item.status.outcome === "completed")) {
-        const result = await host.scheduling!.result!(item.step.target!, item.step.runId!);
+        const result = await completedResult(item.step.target!, item.step.runId!);
         await save(() => { completeStep(item.step, result); });
       }
       const catalog = availableModels((await host.scheduling!.options!(flow.projectId)).models);
@@ -430,7 +435,7 @@ export const activate: PluginModule["activate"] = async host => {
     } else throw new Error("不支持的工作流操作");
   };
   const activeOutcome = async (flow: Flow) => {
-    const active = flow.steps.filter(item => item.state === "running");
+    const active = flow.steps.filter(item => item.state === "running" || (item.state === "failed" && !!item.target));
     if (!active.length) return undefined;
     if (active.some(item => !item.target || !item.runId)) return "unknown";
     try {

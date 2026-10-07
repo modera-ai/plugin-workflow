@@ -296,7 +296,7 @@ export const activate: PluginModule["activate"] = async host => {
       await create(context.projectId, { title: parts[0]!.slice(0, 120), steps: parts.map((title, index) => ({ title: title.slice(0, 120), instruction: `执行第 ${index + 1} 步：${title}` })) });
       return;
     }
-    const id = action.value;
+    const id = action.id === "continueFailed" ? formValue(action.value).flowId : action.value;
     if (!id) throw new Error("请选择工作流");
     const flow = find(context.projectId, id);
     if (action.id === "approveStep") {
@@ -321,6 +321,48 @@ export const activate: PluginModule["activate"] = async host => {
       for (const step of flow.steps) if (step.kind !== "approval" && step.selection && !catalog.some(item => item.value === selectionValue(step.selection!))) throw new Error(`${step.title}：所选模型已不可用，请重新选择`);
       await save(() => { if (flow.state !== "draft") throw new Error("草稿状态已变化"); flow.state = "running"; });
       try { run(flow, context); } catch (error) { await save(() => { flow.state = "failed"; flow.error = String(error); }); throw error; }
+    } else if (action.id === "continueFailed") {
+      const { flowId, stepId, text } = formValue(action.value);
+      if (flowId !== flow.id || !stepId || flow.state !== "failed") throw new Error("工作流当前不能在原会话继续");
+      const step = flow.steps.find(item => item.id === stepId);
+      if (!step?.target || !step.runId || step.state !== "failed" || step.kind === "approval" || !host.scheduling!.continueRole)
+        throw new Error("此步骤没有可继续的失败会话");
+      const previousRunId = step.runId;
+      const target = step.target;
+      const active = flow.steps.filter(item => item.state === "running");
+      if (active.length) throw new Error("请先核实并整理仍显示运行中的步骤，再继续失败步骤");
+      const status = await host.scheduling!.inspect(target, previousRunId);
+      if (status.busy || status.outcome !== "failed") throw new Error("步骤状态已变化，请刷新后核实");
+      await save(() => { flow.state = "running"; flow.error = undefined; step.state = "running"; });
+      try {
+        host.runBackground!({ ...context, label: `继续步骤：${step.title}` }, async backgroundSignal => {
+          const signal = AbortSignal.any([backgroundSignal, host.scopeSignal?.(flow.projectId) ?? host.signal]);
+          try {
+            const started = await host.scheduling!.continueRole!(target, previousRunId, text || `请根据原会话上下文继续完成「${step.title}」，并报告实际结果。`, signal);
+            await save(() => { step.runId = started.runId; });
+            for (;;) {
+              signal.throwIfAborted();
+              const current = await host.scheduling!.inspect(target, started.runId);
+              if (current.outcome === "completed") {
+                const result = await host.scheduling!.result!(target, started.runId);
+                await save(() => { step.state = "completed"; step.result = result.text.slice(0, 10000); });
+                if (flow.steps.some(item => item.state === "failed")) {
+                  await save(() => { flow.state = "failed"; flow.error = "还有失败步骤需要逐一处理。"; });
+                  return;
+                }
+                run(flow, context);
+                return;
+              }
+              if (current.outcome !== "running") throw new Error(`${step.title}：${current.outcome}`);
+              await new Promise<void>((resolve, reject) => {
+                const aborted = () => { clearTimeout(timer); reject(signal.reason); };
+                const timer = setTimeout(() => { signal.removeEventListener("abort", aborted); resolve(); }, 1500);
+                signal.addEventListener("abort", aborted, { once: true });
+              });
+            }
+          } catch (error) { await save(() => { step.state = "failed"; flow.state = "failed"; flow.error = String(error); }); }
+        });
+      } catch (error) { await save(() => { step.state = "failed"; flow.state = "failed"; flow.error = String(error); }); throw error; }
     } else if (action.id === "retry" || action.id === "rerunUnknown") {
       if (!["failed", "interrupted"].includes(flow.state)) throw new Error("工作流当前不可继续");
       const active = flow.steps.filter(item => item.state === "running");
@@ -393,13 +435,14 @@ export const activate: PluginModule["activate"] = async host => {
       ] : []),
       ...(step.target?.sessionId ? [{ type: "conversation-link" as const, label: "打开步骤会话", sessionId: step.target.sessionId }] : []),
       ...(step.previousSessions ?? []).filter(id => id !== step.target?.sessionId).map(id => ({ type: "conversation-link" as const, label: "打开上次执行会话", sessionId: id })),
+      ...(flow.state === "failed" && step.state === "failed" && step.target && step.runId ? [{ type: "form" as const, label: "在原会话继续此步骤", placeholder: "补充失败原因或下一步要求（可留空）", initialValue: "", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "continueFailed", maxLength: 3800, multiline: true }] : []),
       ...(flow.state === "paused" && step.state === "awaitingApproval" ? [{ type: "button" as const, label: "已检查，继续工作流", action: "approveStep", value: flow.id }] : []),
     ];
     }),
     ...(flow.error ? [{ type: "text" as const, text: flow.error }] : []),
     ...(flow.state === "draft" ? [{ type: "button" as const, label: "确认并开始", action: "start", value: flow.id }] : []),
     ...(["failed", "interrupted"].includes(flow.state) ? [{ type: "text" as const, text: "继续前会核实上次步骤的结果；无法确认时会停止并请你打开步骤会话检查。已完成步骤不会重跑。" }] : []),
-    ...(["failed", "interrupted"].includes(flow.state) && !["unknown", "interrupted"].includes(previousOutcome ?? "") ? [{ type: "button" as const, label: "核实并继续未完成步骤", action: "retry", value: flow.id }] : []),
+    ...(["failed", "interrupted"].includes(flow.state) && !["unknown", "interrupted"].includes(previousOutcome ?? "") ? [{ type: "button" as const, label: "在新会话重试未完成步骤", action: "retry", value: flow.id }] : []),
     ...(["failed", "interrupted"].includes(flow.state) && ["unknown", "interrupted"].includes(previousOutcome ?? "") ? [
       { type: "text" as const, text: "上次步骤结果无法确认。请先打开步骤会话检查；确认可以重复执行后，再使用下面的操作。重跑可能重复修改文件或调用外部工具。" },
       { type: "button" as const, label: "已核实，重新执行此步骤", action: "rerunUnknown", value: flow.id },
@@ -422,7 +465,7 @@ export const activate: PluginModule["activate"] = async host => {
     ui: [{
       id: "modera.workflow.workbench", slot: "workbench", frontend: "workbench", workbench: { title: "工作流", icon: "network", order: -101 },
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-      actions: ["create", "showFlow", "showPage", "showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "refresh"], act,
+      actions: ["create", "showFlow", "showPage", "showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "continueFailed", "refresh"], act,
       async render(_request, context) {
         if (!context.projectId) return { title: "工作流", children: [{ type: "text", text: "请先选择项目。" }] };
         const projectId = context.projectId;
@@ -436,7 +479,7 @@ export const activate: PluginModule["activate"] = async host => {
           flows: allFlows.map(item => ({ id: item.id, title: item.title, state: item.state, createdAt: item.createdAt, stepCount: item.steps.length })),
           active: active ? { id: active.id, title: active.title, state: active.state, error: active.error, steps: active.steps.map(step => ({
             id: step.id, title: step.title, instruction: step.instruction, kind: step.kind ?? "task", state: step.state,
-            dependsOn: dependencies(active, step), selection: step.selection, target: step.target,
+            dependsOn: dependencies(active, step), selection: step.selection, target: step.target, runId: step.runId,
             result: step.result?.slice(0, 1500), previousSessions: step.previousSessions,
           })) } : undefined,
           selectedStepId: active ? selectedSteps.get(active.id) : undefined,
@@ -458,7 +501,7 @@ export const activate: PluginModule["activate"] = async host => {
     }, {
       id: "modera.workflow.result", slot: "tool.result", toolNames: ["workflow_draft"],
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-      actions: ["showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "refresh"], act,
+      actions: ["showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "continueFailed", "refresh"], act,
       async render(request, context) {
         if (!context.projectId) return { title: "工作流", children: [] };
         const result = request.tool?.result ? JSON.parse(request.tool.result) as { flowId?: string } : {};

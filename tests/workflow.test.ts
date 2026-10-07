@@ -8,6 +8,41 @@ import { activate } from "../src/index";
 const roots: string[] = [];
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
 
+test("a failed step continues in its original conversation before downstream steps run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-continue-"));
+  roots.push(root);
+  await writeFile(join(root, "flows.json"), JSON.stringify({ version: 1, flows: [{ id: "flow", projectId: "project", title: "Recover", state: "failed", createdAt: 1, steps: [
+    { id: "a", title: "A", instruction: "Do A", state: "failed", target: { projectId: "project", sessionId: "original", selection: { profileId: "local", model: "test", reasoningEffort: "medium" } }, runId: "failed-run" },
+    { id: "b", title: "B", instruction: "Do B", state: "pending" },
+  ] }] }));
+  const continued: string[] = [];
+  const started: string[] = [];
+  const backgrounds: Promise<void>[] = [];
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { backgrounds.push(task(new AbortController().signal)); },
+    scheduling: {
+      options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object, title: string) => ({ ...target, sessionId: title }),
+      continueRole: async (target: { sessionId: string }, previous: string, prompt: string) => { continued.push(`${target.sessionId}:${previous}:${prompt}`); return { runId: "continued-run" }; },
+      startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: "downstream-run" }; },
+      inspect: async (_target: unknown, runId: string) => ({ outcome: runId === "failed-run" ? "failed" : "completed", busy: false }),
+      result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: `result ${runId}` }),
+    },
+  } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.act) throw new Error("Workflow workbench missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  await workbench.act({ id: "continueFailed", value: JSON.stringify({ context: JSON.stringify({ flowId: "flow", stepId: "a" }), text: "Fix the failure" }) }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
+  for (let index = 0; index < backgrounds.length; index++) await backgrounds[index];
+  expect(continued).toEqual(["original:failed-run:Fix the failure"]);
+  expect(started).toEqual(["B"]);
+  const saved = JSON.parse(await readFile(join(root, "flows.json"), "utf8"));
+  expect(saved.flows[0].state).toBe("completed");
+  expect(saved.flows[0].steps[0].target.sessionId).toBe("original");
+  expect(saved.flows[0].steps[0].runId).toBe("continued-run");
+});
+
 test("independent workflow steps start together and a join waits for both results", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-graph-"));
   roots.push(root);

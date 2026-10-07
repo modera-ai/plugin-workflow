@@ -137,7 +137,7 @@ export const activate: PluginModule["activate"] = async host => {
     const ids = data.steps.map(() => randomUUID());
     const flow: Flow = { id: randomUUID(), projectId, title: data.title, state: "draft", createdAt: Date.now(), steps: data.steps.map((step, index) => ({ title: step.title, instruction: step.instruction, id: ids[index]!, dependsOn: step.after?.map(number => ids[number - 1]!) ?? (index ? [ids[index - 1]!] : []), state: "pending" })) };
     validateGraph(flow);
-    await save(() => { state.flows.unshift(flow); state.flows = state.flows.slice(0, 100); });
+    await save(() => { state.flows.unshift(flow); });
     selectedFlows.set(projectId, flow.id);
     flowPages.set(projectId, 0);
     selectedSteps.set(flow.id, flow.steps[0]!.id);

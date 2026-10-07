@@ -12,6 +12,8 @@ test("a model draft waits for user confirmation and then runs native step conver
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-test-"));
   roots.push(root);
   const started: string[] = [];
+  const selections: { profileId: string; model: string }[] = [];
+  let reviewEnabled = true;
   let background: Promise<void> | undefined;
   const host = {
     storagePath: root,
@@ -19,8 +21,11 @@ test("a model draft waits for user confirmation and then runs native step conver
     invalidateUi() {},
     runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
     scheduling: {
-      options: async () => ({ conversations: [], models: [{ profileId: "local", name: "Local", models: ["test-model"], efforts: { "test-model": ["medium"] } }] }),
-      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      options: async () => ({ conversations: [], models: [
+        { profileId: "local", name: "Local", models: ["test-model"], efforts: { "test-model": ["medium"] } },
+        ...(reviewEnabled ? [{ profileId: "review", name: "Review", models: ["review-model"], efforts: { "review-model": ["high"] } }] : []),
+      ] }),
+      target: async (projectId: string, sessionId: string, selection: { profileId: string; model: string }) => { selections.push(selection); return { projectId, sessionId, selection }; },
       prepare: async (target: object) => ({ ...target, sessionId: `session-${started.length + 1}` }),
       startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: `run-${started.length}` }; },
       inspect: async () => ({ outcome: "completed" }),
@@ -39,6 +44,7 @@ test("a model draft waits for user confirmation and then runs native step conver
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   const draft = await workbench.render(request, context);
   const stepForms = draft.children.filter(node => node.type === "form" && node.action === "editStep");
+  expect(stepForms.every(node => node.type === "form" && node.multiline)).toBe(true);
   const first = JSON.parse(stepForms[0]!.type === "form" ? stepForms[0]!.context! : "{}") as { stepId: string };
   const second = JSON.parse(stepForms[1]!.type === "form" ? stepForms[1]!.context! : "{}") as { stepId: string };
   await workbench.act!({ id: "editTitle", value: JSON.stringify({ context: JSON.stringify({ flowId: output.flowId }), text: "Release safely" }) }, context, request);
@@ -52,10 +58,32 @@ test("a model draft waits for user confirmation and then runs native step conver
   await workbench.act!({ id: "deleteStep", value: JSON.stringify({ flowId: output.flowId, stepId: second.stepId }) }, context, request);
   edited = await workbench.render(request, context);
   expect(JSON.stringify(edited.children)).not.toContain("Run checks");
+  const reviewSelect = edited.children.find(node => node.type === "select" && JSON.parse(node.context ?? "{}").stepId === review.stepId);
+  if (reviewSelect?.type !== "select") throw new Error("Review model selector missing");
+  const chosen = reviewSelect.options.find(option => option.label === "Review / review-model");
+  expect(chosen).toBeDefined();
+  await expect(workbench.act!({ id: "setModel", value: JSON.stringify({ context: reviewSelect.context, value: "unavailable" }) }, context, request)).rejects.toThrow("不可用");
+  await workbench.act!({ id: "setModel", value: JSON.stringify({ context: reviewSelect.context, value: chosen!.value }) }, context, request);
+  reviewEnabled = false;
+  await expect(workbench.act!({ id: "start", value: output.flowId }, context, request)).rejects.toThrow("模型已不可用");
+  expect(started).toEqual([]);
+  reviewEnabled = true;
   await workbench.act!({ id: "start", value: output.flowId }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
   await background;
   expect(started).toEqual(["Implement", "Review"]);
+  expect(selections).toMatchObject([{ profileId: "local", model: "test-model" }, { profileId: "review", model: "review-model" }]);
   const view = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
   expect(JSON.stringify(view.children)).toContain("已完成");
   expect(JSON.stringify(view.children)).toContain("session-2");
+  const another = await contributions.tools[0]!.execute({ title: "Second flow", steps: [
+    { title: "Draft", instruction: "Draft note" }, { title: "Review", instruction: "Review note" },
+  ] }, context) as { flowId: string };
+  const selectedView = await workbench.render(request, context);
+  expect(JSON.stringify(selectedView.children)).toContain("Draft note");
+  expect(JSON.stringify(selectedView.children)).not.toContain("Change code");
+  await workbench.act!({ id: "showFlow", value: output.flowId }, context, request);
+  const switched = await workbench.render(request, context);
+  expect(JSON.stringify(switched.children)).toContain("Change code");
+  expect(JSON.stringify(switched.children)).not.toContain("Draft note");
+  expect(another.flowId).not.toBe(output.flowId);
 });

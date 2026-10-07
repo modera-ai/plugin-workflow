@@ -1,14 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { declaredTool, type PluginModule, type PluginUiNode, type ScheduledRunTarget, type ToolContext } from "@modera/plugin-sdk";
+import { declaredTool, type PluginContext, type PluginModule, type PluginUiNode, type ScheduledRunTarget, type ToolContext } from "@modera/plugin-sdk";
 import manifest from "../plugin.json";
 
-type Step = { id: string; title: string; instruction: string; state: "pending" | "running" | "completed" | "failed"; target?: ScheduledRunTarget; runId?: string; result?: string };
+type Selection = ScheduledRunTarget["selection"];
+type Models = Awaited<ReturnType<NonNullable<NonNullable<PluginContext["scheduling"]>["options"]>>>["models"];
+type Step = { id: string; title: string; instruction: string; state: "pending" | "running" | "completed" | "failed"; selection?: Selection; target?: ScheduledRunTarget; runId?: string; result?: string };
 type Flow = { id: string; projectId: string; title: string; state: "draft" | "running" | "completed" | "failed" | "interrupted"; steps: Step[]; createdAt: number; error?: string };
 type State = { version: 1; flows: Flow[] };
 const flowStates: Record<Flow["state"], string> = { draft: "待确认", running: "运行中", completed: "已完成", failed: "失败", interrupted: "需核实" };
 const stepStates: Record<Step["state"], string> = { pending: "等待执行", running: "运行中", completed: "已完成", failed: "失败" };
+const selectionValue = (selection: Selection) => JSON.stringify([selection.profileId, selection.model]);
+const availableModels = (models: Models) => models.flatMap(profile => profile.models.map(model => {
+  const efforts = profile.efforts?.[model];
+  const reasoningEffort = efforts?.includes("medium") ? "medium" : efforts?.[0] ?? "medium";
+  const selection: Selection = { profileId: profile.profileId, model, reasoningEffort };
+  return { value: selectionValue(selection), label: `${profile.name} / ${model}`.slice(0, 200), selection };
+}));
 const formValue = (value?: string): { flowId: string; stepId?: string; text: string } => {
   const envelope = JSON.parse(value ?? "{}") as { context?: string; text?: string };
   const ids = JSON.parse(envelope.context ?? "{}") as { flowId?: string; stepId?: string };
@@ -39,6 +48,7 @@ export const activate: PluginModule["activate"] = async host => {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; state = { version: 1, flows: [] }; }
   if (state.version !== 1 || !Array.isArray(state.flows)) throw new Error("工作流记录格式无效");
   for (const flow of state.flows) if (flow.state === "running") flow.state = "interrupted";
+  const selectedFlows = new Map<string, string>();
   let queue = Promise.resolve();
   const save = (change: () => void) => {
     const operation = queue.then(async () => {
@@ -55,6 +65,7 @@ export const activate: PluginModule["activate"] = async host => {
     const data = validate(raw);
     const flow: Flow = { id: randomUUID(), projectId, title: data.title, state: "draft", createdAt: Date.now(), steps: data.steps.map(step => ({ ...step, id: randomUUID(), state: "pending" })) };
     await save(() => { state.flows.unshift(flow); state.flows = state.flows.slice(0, 100); });
+    selectedFlows.set(projectId, flow.id);
     return flow;
   };
   const find = (projectId: string, id: string) => {
@@ -67,14 +78,16 @@ export const activate: PluginModule["activate"] = async host => {
       const signal = AbortSignal.any([backgroundSignal, host.scopeSignal?.(flow.projectId) ?? host.signal]);
       try {
         const options = await host.scheduling!.options!(flow.projectId);
-        const model = options.models[0], name = model?.models[0];
-        if (!model || !name) throw new Error("请先配置可用模型");
-        const effort = model.efforts?.[name]?.includes("medium") ? "medium" : model.efforts?.[name]?.[0] ?? "medium";
-        const selection = { profileId: model.profileId, model: name, reasoningEffort: effort };
+        const catalog = availableModels(options.models);
+        const defaultSelection = catalog[0]?.selection;
+        if (!defaultSelection) throw new Error("请先配置可用模型");
         for (let index = 0; index < flow.steps.length; index++) {
           signal.throwIfAborted();
           const step = flow.steps[index]!;
           if (step.state === "completed") continue;
+          const pinned = step.selection;
+          if (pinned && !catalog.some(item => item.value === selectionValue(pinned))) throw new Error(`${step.title}：所选模型已不可用，请重新选择`);
+          const selection = pinned ?? defaultSelection;
           const previous = flow.steps.slice(0, index).map(item => `${item.title}: ${item.result ?? ""}`).join("\n\n").slice(0, 20000);
           await save(() => { step.state = "running"; step.result = undefined; flow.error = undefined; });
           const target = await host.scheduling!.prepare!(await host.scheduling!.target!(flow.projectId, "", selection), `${flow.title} · ${step.title}`, true,
@@ -110,6 +123,27 @@ export const activate: PluginModule["activate"] = async host => {
   const act = async (action: { id: string; value?: string }, context: ToolContext) => {
     if (!context.projectId) throw new Error("请选择项目");
     if (action.id === "refresh") return;
+    if (action.id === "showFlow") {
+      find(context.projectId, action.value ?? "");
+      selectedFlows.set(context.projectId, action.value!);
+      host.invalidateUi?.();
+      return;
+    }
+    if (action.id === "setModel") {
+      const envelope = JSON.parse(action.value ?? "{}") as { context?: string; value?: string };
+      const ids = JSON.parse(envelope.context ?? "{}") as { flowId?: string; stepId?: string };
+      const flow = find(context.projectId, ids.flowId ?? "");
+      const step = flow.steps.find(item => item.id === ids.stepId);
+      if (!step || !["draft", "failed", "interrupted"].includes(flow.state) || !["pending", "failed"].includes(step.state)) throw new Error("此步骤当前不能修改模型");
+      const models = availableModels((await host.scheduling!.options!(flow.projectId)).models);
+      const selection = envelope.value === "default" ? undefined : models.find(item => item.value === envelope.value)?.selection;
+      if (envelope.value !== "default" && !selection) throw new Error("所选模型已不可用");
+      await save(() => {
+        if (!["draft", "failed", "interrupted"].includes(flow.state) || !["pending", "failed"].includes(step.state)) throw new Error("步骤状态已变化");
+        step.selection = selection;
+      });
+      return;
+    }
     if (["editTitle", "editStep", "editStepTitle", "addStep"].includes(action.id)) {
       const input = formValue(action.value);
       const flow = find(context.projectId, input.flowId);
@@ -160,6 +194,9 @@ export const activate: PluginModule["activate"] = async host => {
     const flow = find(context.projectId, id);
     if (action.id === "start") {
       if (flow.state !== "draft") throw new Error("只有草稿可以开始");
+      const catalog = availableModels((await host.scheduling!.options!(flow.projectId)).models);
+      if (!catalog.length) throw new Error("请先配置可用模型");
+      for (const step of flow.steps) if (step.selection && !catalog.some(item => item.value === selectionValue(step.selection!))) throw new Error(`${step.title}：所选模型已不可用，请重新选择`);
       await save(() => { if (flow.state !== "draft") throw new Error("草稿状态已变化"); flow.state = "running"; });
       try { run(flow, context); } catch (error) { await save(() => { flow.state = "failed"; flow.error = String(error); }); throw error; }
     } else if (action.id === "retry") {
@@ -178,25 +215,43 @@ export const activate: PluginModule["activate"] = async host => {
       try { run(flow, context); } catch (error) { await save(() => { flow.state = "failed"; flow.error = String(error); }); throw error; }
     } else throw new Error("不支持的工作流操作");
   };
-  const nodes = (flow: Flow): PluginUiNode[] => [
+  const nodes = (flow: Flow, models: Models): PluginUiNode[] => {
+    const catalog = availableModels(models);
+    const defaultLabel = catalog[0]?.label ?? "未配置模型";
+    return [
     { type: "text", text: `${flow.title} · ${flowStates[flow.state]}` },
     ...(flow.state === "draft" ? [{ type: "form" as const, label: "修改工作流名称", placeholder: "工作流名称", initialValue: flow.title, context: JSON.stringify({ flowId: flow.id }), action: "editTitle", maxLength: 120 }] : []),
-    ...flow.steps.flatMap((step, index): PluginUiNode[] => [
-      { type: "document", label: `${index + 1}. ${step.title} · ${stepStates[step.state]}`, text: step.instruction + (step.result ? `\n\n结果：${step.result.slice(0, 1500)}` : "") },
+    ...flow.steps.flatMap((step, index): PluginUiNode[] => {
+      const displaySelection = ["running", "completed"].includes(step.state) ? step.target?.selection : step.selection;
+      const modelLabel = displaySelection ? catalog.find(item => item.value === selectionValue(displaySelection))?.label ?? "当前配置不可用" : defaultLabel;
+      const listed = catalog.slice(0, 90);
+      const pinned = step.selection ? selectionValue(step.selection) : undefined;
+      return [
+      ...(flow.state === "draft" ? [{ type: "text" as const, text: `第 ${index + 1} 步 · 待确认` }] : [{ type: "document" as const, label: `${index + 1}. ${step.title} · ${stepStates[step.state]}`, text: `${step.instruction}\n\n模型：${modelLabel}${step.result ? `\n\n结果：${step.result.slice(0, 1500)}` : ""}` }]),
       ...(flow.state === "draft" ? [
         { type: "form" as const, label: "步骤名称", placeholder: "简短名称", initialValue: step.title, context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "editStepTitle", maxLength: 120 },
-        { type: "form" as const, label: "本步要求", placeholder: "写清本步目标和完成条件", initialValue: step.instruction, context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "editStep", maxLength: 3800 },
-        ...(index > 0 ? [{ type: "button" as const, label: "上移", action: "moveUp", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
-        ...(index < flow.steps.length - 1 ? [{ type: "button" as const, label: "下移", action: "moveDown", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
-        ...(flow.steps.length > 2 ? [{ type: "button" as const, label: "删除步骤", action: "deleteStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), icon: "trash" as const, quiet: true }] : []),
+        { type: "form" as const, label: "保存本步要求", placeholder: "写清本步目标和完成条件", initialValue: step.instruction, context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "editStep", maxLength: 3800, multiline: true },
+      ] : []),
+      ...(["draft", "failed", "interrupted"].includes(flow.state) && ["pending", "failed"].includes(step.state) ? [{
+        type: "select" as const, label: "本步执行模型", action: "setModel", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), value: pinned ?? "default",
+        options: [{ label: `默认：${defaultLabel}`, value: "default" }, ...listed.map(item => ({ label: item.label, value: item.value })), ...(pinned && !listed.some(item => item.value === pinned) ? [{ label: catalog.find(item => item.value === pinned)?.label ?? "当前选择已不可用", value: pinned }] : [])],
+      }] : []),
+      ...(flow.state === "draft" ? [
+        { type: "row" as const, children: [
+          ...(index > 0 ? [{ type: "button" as const, label: "上移", action: "moveUp", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
+          ...(index < flow.steps.length - 1 ? [{ type: "button" as const, label: "下移", action: "moveDown", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), quiet: true }] : []),
+          ...(flow.steps.length > 2 ? [{ type: "button" as const, label: "删除步骤", action: "deleteStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }), icon: "trash" as const, quiet: true }] : []),
+        ] },
         ...(flow.steps.length < 8 ? [{ type: "form" as const, label: "在此步后添加", placeholder: "新步骤名称", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "addStep", maxLength: 120, submitIcon: "plus" as const }] : []),
       ] : []),
       ...(step.target?.sessionId ? [{ type: "conversation-link" as const, label: "打开步骤会话", sessionId: step.target.sessionId }] : []),
-    ]),
+    ];
+    }),
     ...(flow.error ? [{ type: "text" as const, text: flow.error }] : []),
     ...(flow.state === "draft" ? [{ type: "button" as const, label: "确认并开始", action: "start", value: flow.id }] : []),
     ...(["failed", "interrupted"].includes(flow.state) ? [{ type: "button" as const, label: "继续未完成步骤", action: "retry", value: flow.id }] : []),
   ];
+  };
   return {
     composer: [{
       id: "modera.workflow.command", title: "创建工作流", description: "输入目标，先生成可检查的步骤草稿", kind: "command", aliases: ["workflow"], requiredPermissions: ["storage.read", "storage.write"],
@@ -213,27 +268,33 @@ export const activate: PluginModule["activate"] = async host => {
     ui: [{
       id: "modera.workflow.workbench", slot: "workbench", workbench: { title: "工作流", icon: "network", order: -101 },
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-      actions: ["create", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "start", "retry", "refresh"], act,
+      actions: ["create", "showFlow", "editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setModel", "start", "retry", "refresh"], act,
       async render(_request, context) {
         if (!context.projectId) return { title: "工作流", children: [{ type: "text", text: "请先选择项目。" }] };
-        const available = await host.scheduling!.options!(context.projectId);
+        const projectId = context.projectId;
+        const available = await host.scheduling!.options!(projectId);
         const selected = available.models[0];
+        const flows = state.flows.filter(item => item.projectId === projectId).slice(0, 20);
+        const active = flows.find(item => item.id === selectedFlows.get(projectId)) ?? flows[0];
         return { title: "工作流", children: [
           { type: "text", text: "在聊天输入 /workflow 和你的目标，AI 会先给出步骤草稿。可改名称、要求和步骤顺序，也可增删步骤；确认后才在当前项目目录按顺序执行，每步使用独立会话。" },
-          { type: "text", text: selected?.models[0] ? `执行模型：${selected.name} / ${selected.models[0]}` : "请先配置可用模型" },
+          { type: "text", text: selected?.models[0] ? `默认执行模型：${selected.name} / ${selected.models[0]}` : "请先配置可用模型" },
           { type: "button", label: "刷新状态", action: "refresh" },
-          ...state.flows.filter(item => item.projectId === context.projectId).slice(0, 20).flatMap(nodes),
+          ...(flows.length ? [{ type: "text" as const, text: "选择工作流" }] : []),
+          ...flows.map(item => ({ type: "button" as const, label: `${item.title.slice(0, 60)} · ${flowStates[item.state]}${item.id === active?.id ? " ✓" : ""}`, action: "showFlow", value: item.id })),
+          ...(active ? nodes(active, available.models) : []),
         ] };
       },
     }, {
       id: "modera.workflow.result", slot: "tool.result", toolNames: ["workflow_draft"],
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-      actions: ["editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "start", "retry", "refresh"], act,
+      actions: ["editTitle", "editStepTitle", "editStep", "addStep", "deleteStep", "moveUp", "moveDown", "setModel", "start", "retry", "refresh"], act,
       async render(request, context) {
         if (!context.projectId) return { title: "工作流", children: [] };
         const result = request.tool?.result ? JSON.parse(request.tool.result) as { flowId?: string } : {};
         const flow = result.flowId ? state.flows.find(item => item.id === result.flowId && item.projectId === context.projectId) : undefined;
-        return { title: "工作流草稿", live: true, children: flow ? nodes(flow) : [{ type: "text", text: "草稿生成中或已移除" }] };
+        const models = flow ? (await host.scheduling!.options!(context.projectId)).models : [];
+        return { title: "工作流草稿", live: true, children: flow ? nodes(flow, models) : [{ type: "text", text: "草稿生成中或已移除" }] };
       },
     }],
   };

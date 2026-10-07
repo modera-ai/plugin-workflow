@@ -208,8 +208,8 @@ export const activate: PluginModule["activate"] = async host => {
         while (flow.steps.some(step => step.state !== "completed")) {
           signal.throwIfAborted();
           if (flow.steps.some(step => step.state === "awaitingApproval")) {
-            await save(() => { flow.state = "paused"; flow.error = undefined; });
-            return;
+            await save(() => { if (flow.steps.some(step => step.state === "awaitingApproval")) { flow.state = "paused"; flow.error = undefined; } });
+            if (flow.state === "paused") return;
           }
           const ready = flow.steps.filter(step => step.state !== "completed" && dependencies(flow, step).every(id => flow.steps.find(item => item.id === id)?.state === "completed"));
           if (!ready.length) throw new Error("工作流没有可运行步骤，请检查依赖和失败步骤状态");
@@ -219,8 +219,9 @@ export const activate: PluginModule["activate"] = async host => {
           }
           const peerTasks = ready.filter(step => step.kind !== "approval");
           if (!peerTasks.length) {
-            await save(() => { flow.state = "paused"; });
-            return;
+            await save(() => { if (flow.steps.some(step => step.state === "awaitingApproval")) flow.state = "paused"; });
+            if (flow.state === "paused") return;
+            continue;
           }
           const outcomes = await Promise.allSettled(peerTasks.map(async step => {
             try { await executeStep(step, peerTasks); }
@@ -386,20 +387,23 @@ export const activate: PluginModule["activate"] = async host => {
     if (!id) throw new Error("请选择工作流");
     const flow = find(context.projectId, id);
     if (action.id === "approveStep") {
-      if (flow.state !== "paused") throw new Error("工作流当前未等待确认");
+      if (flow.state !== "paused" && flow.state !== "running") throw new Error("工作流当前未等待确认");
       const catalog = availableModels((await host.scheduling!.options!(flow.projectId)).models);
       for (const step of flow.steps) if (step.kind !== "approval" && step.state !== "completed") {
         if (!catalog.length) throw new Error("请先配置可用模型");
         if (step.selection && !catalog.some(item => item.value === selectionValue(step.selection!))) throw new Error(`${step.title}：所选模型已不可用，请重新选择`);
       }
+      let resume = false;
       await save(() => {
-        if (flow.state !== "paused") throw new Error("工作流当前未等待确认");
+        if (flow.state !== "paused" && flow.state !== "running") throw new Error("工作流当前未等待确认");
         const waiting = flow.steps.filter(item => item.state === "awaitingApproval" && item.kind === "approval");
         const step = approval?.stepId ? waiting.find(item => item.id === approval.stepId) : waiting.length === 1 ? waiting[0] : undefined;
         if (!step) throw new Error(approval?.stepId ? "指定的步骤未等待确认" : "请指定要确认的步骤");
-        step.state = "completed"; step.result = "用户已确认此步骤的条件，继续后续步骤。"; flow.state = "running";
+        resume = flow.state === "paused";
+        step.state = "completed"; step.result = "用户已确认此步骤的条件，继续后续步骤。";
+        if (resume) flow.state = "running";
       });
-      try { run(flow, context); } catch (error) { await save(() => { flow.state = "failed"; flow.error = String(error); }); throw error; }
+      if (resume) try { run(flow, context); } catch (error) { await save(() => { flow.state = "failed"; flow.error = String(error); }); throw error; }
     } else if (action.id === "start") {
       if (flow.state !== "draft") throw new Error("只有草稿可以开始");
       validateGraph(flow);
@@ -529,7 +533,7 @@ export const activate: PluginModule["activate"] = async host => {
       ...(step.target?.sessionId ? [{ type: "conversation-link" as const, label: "打开步骤会话", sessionId: step.target.sessionId }] : []),
       ...(step.previousSessions ?? []).filter(id => id !== step.target?.sessionId).map(id => ({ type: "conversation-link" as const, label: "打开上次执行会话", sessionId: id })),
       ...(flow.state === "failed" && step.state === "failed" && step.target && step.runId ? [{ type: "form" as const, label: "在原会话继续此步骤", placeholder: "补充失败原因或下一步要求（可留空）", initialValue: "", context: JSON.stringify({ flowId: flow.id, stepId: step.id }), action: "continueFailed", maxLength: 3800, multiline: true }] : []),
-      ...(flow.state === "paused" && step.state === "awaitingApproval" ? [{ type: "button" as const, label: `已检查「${step.title}」，继续工作流`, action: "approveStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }) }] : []),
+      ...(["paused", "running"].includes(flow.state) && step.state === "awaitingApproval" ? [{ type: "button" as const, label: `已检查「${step.title}」，继续工作流`, action: "approveStep", value: JSON.stringify({ flowId: flow.id, stepId: step.id }) }] : []),
     ];
     }),
     ...(flow.error ? [{ type: "text" as const, text: flow.error }] : []),

@@ -651,19 +651,21 @@ test("parallel approval buttons confirm only their own step", async () => {
   expect((await workbench.render(request, context)).data?.active).toMatchObject({ state: "completed" });
 });
 
-test("an independent task runs before the workflow pauses for a parallel approval", async () => {
+test("an approval can be confirmed while an independent task is still running", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-approval-parallel-task-"));
   roots.push(root);
   const started: string[] = [];
   let background: Promise<void> | undefined;
+  let backgroundStarts = 0;
+  let checkFinished = false;
   const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
-    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { backgroundStarts++; background = task(new AbortController().signal); },
     scheduling: {
       options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
       target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
       prepare: async (target: object) => ({ ...target, sessionId: `session-${started.length + 1}` }),
       startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: `run-${started.length}` }; },
-      inspect: async () => ({ outcome: "completed" }), result: async () => ({ outcome: "completed", text: "done" }),
+      inspect: async (_target: unknown, runId: string) => ({ outcome: runId === "run-1" && !checkFinished ? "running" : "completed" }), result: async () => ({ outcome: "completed", text: "done" }),
     },
   } as unknown as PluginContext;
   const contributions = await activate(host);
@@ -679,14 +681,20 @@ test("an independent task runs before the workflow pauses for a parallel approva
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   await workbench.act({ id: "setStepKind", value: JSON.stringify({ context: JSON.stringify({ flowId: created.flowId, stepId: flow.steps[0]!.id }), value: "approval" }) }, context, request);
   await workbench.act({ id: "start", value: created.flowId }, context, request);
-  await background;
+  for (let attempt = 0; attempt < 50 && !started.length; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   expect(started).toEqual(["Independent check"]);
-  const paused = (await workbench.render(request, context)).data?.active as { state: string; steps: { state: string }[] };
-  expect(paused.state).toBe("paused");
-  expect(paused.steps.map(step => step.state)).toEqual(["awaitingApproval", "completed", "pending"]);
+  const running = await workbench.render(request, context);
+  expect(running.data?.active).toMatchObject({ state: "running" });
+  expect(running.children.some(node => node.type === "button" && node.action === "approveStep")).toBe(true);
   await workbench.act({ id: "approveStep", value: JSON.stringify({ flowId: created.flowId, stepId: flow.steps[0]!.id }) }, context, request);
+  expect(backgroundStarts).toBe(1);
+  expect(started).toEqual(["Independent check"]);
+  checkFinished = true;
   await background;
   expect(started).toEqual(["Independent check", "Publish"]);
+  expect(backgroundStarts).toBe(1);
   expect((await workbench.render(request, context)).data?.active).toMatchObject({ state: "completed" });
 });
 

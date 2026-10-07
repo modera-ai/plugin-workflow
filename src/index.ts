@@ -88,6 +88,34 @@ export const activate: PluginModule["activate"] = async host => {
     queue = operation.then(() => {}, () => {});
     return operation;
   };
+  const reconcileFlow = async (flow: Flow) => {
+    if (flow.state !== "interrupted" && flow.state !== "failed") return;
+    const updates: { step: Step; state: "completed" | "failed"; result?: string; outcome: string }[] = [];
+    for (const step of flow.steps.filter(item => item.state === "running" && item.target && item.runId)) {
+      try {
+        const status = await host.scheduling!.inspect(step.target!, step.runId!);
+        if (status.outcome === "completed") {
+          const result = await host.scheduling!.result!(step.target!, step.runId!);
+          if (result.outcome === "completed") updates.push({ step, state: "completed", result: result.text.slice(0, 10000), outcome: "completed" });
+        } else if (status.outcome === "failed" || status.outcome === "cancelled") {
+          updates.push({ step, state: "failed", outcome: status.outcome });
+        }
+      } catch { /* Keep uncertain nodes visible for manual verification. */ }
+    }
+    if (!updates.length) return;
+    await save(() => {
+      for (const update of updates) {
+        if (update.step.state !== "running") continue;
+        update.step.state = update.state;
+        if (update.state === "completed") update.step.result = update.result;
+        else flow.error = `${update.step.title}：${update.outcome}`;
+      }
+      if (flow.state === "interrupted") {
+        if (flow.steps.every(step => step.state === "completed")) { flow.state = "completed"; flow.error = undefined; }
+        else if (flow.steps.some(step => step.state === "failed")) flow.state = "failed";
+      }
+    });
+  };
   const create = async (projectId: string, raw: unknown) => {
     const data = validate(raw);
     const ids = data.steps.map(() => randomUUID());
@@ -413,7 +441,7 @@ export const activate: PluginModule["activate"] = async host => {
       const listed = catalog.slice(0, 90);
       const pinned = step.selection ? selectionValue(step.selection) : undefined;
       return [
-      ...(flow.state === "draft" ? [{ type: "text" as const, text: `编辑第 ${index + 1} 步 · ${step.kind === "approval" ? "人工确认" : "执行任务"}` }] : [{ type: "document" as const, label: `${index + 1}. ${step.title} · ${stepStates[step.state]}`, text: `${step.instruction}${step.kind === "approval" ? "\n\n此步由你检查并确认，不会启动 Agent。" : `\n\n模型：${modelLabel}`}${step.result ? `\n\n结果：${step.result.slice(0, 1500)}` : ""}` }]),
+      ...(flow.state === "draft" ? [{ type: "text" as const, text: `编辑第 ${index + 1} 步 · ${step.kind === "approval" ? "人工确认" : "执行任务"}` }] : [{ type: "document" as const, label: `${index + 1}. ${step.title} · ${flow.state === "interrupted" && step.state === "running" ? "待核实" : stepStates[step.state]}`, text: `${step.instruction}${step.kind === "approval" ? "\n\n此步由你检查并确认，不会启动 Agent。" : `\n\n模型：${modelLabel}`}${step.result ? `\n\n结果：${step.result.slice(0, 1500)}` : ""}` }]),
       { type: "text", text: `前置步骤：${dependencies(flow, step).map(id => flow.steps.find(item => item.id === id)?.title ?? "无效步骤").join("、") || "无（可立即开始）"}` },
       ...(flow.state === "draft" ? [
         ...flow.steps.filter(item => item.id !== step.id).map(item => ({ type: "button" as const, label: `${dependencies(flow, step).includes(item.id) ? "✓ " : "+ "}依赖「${item.title.slice(0, 50)}」`, action: "toggleDependency", value: JSON.stringify({ flowId: flow.id, stepId: step.id, prerequisiteId: item.id }), quiet: true })),
@@ -474,6 +502,7 @@ export const activate: PluginModule["activate"] = async host => {
         const allFlows = state.flows.filter(item => item.projectId === projectId);
         const page = Math.min(flowPages.get(projectId) ?? 0, Math.max(0, Math.ceil(allFlows.length / 10) - 1));
         const flows = allFlows.slice(page * 10, page * 10 + 10);
+        await Promise.all(flows.map(reconcileFlow));
         const active = flows.find(item => item.id === selectedFlows.get(projectId)) ?? flows[0];
         return { title: "工作流", data: {
           flows: allFlows.map(item => ({ id: item.id, title: item.title, state: item.state, createdAt: item.createdAt, stepCount: item.steps.length })),
@@ -506,6 +535,7 @@ export const activate: PluginModule["activate"] = async host => {
         if (!context.projectId) return { title: "工作流", children: [] };
         const result = request.tool?.result ? JSON.parse(request.tool.result) as { flowId?: string } : {};
         const flow = result.flowId ? state.flows.find(item => item.id === result.flowId && item.projectId === context.projectId) : undefined;
+        if (flow) await reconcileFlow(flow);
         const models = flow ? (await host.scheduling!.options!(context.projectId)).models : [];
         return { title: "工作流草稿", live: true, children: flow ? nodes(flow, models, await activeOutcome(flow)) : [{ type: "text", text: "草稿生成中或已移除" }] };
       },

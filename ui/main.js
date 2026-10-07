@@ -32,7 +32,7 @@ function graph(flow) {
   })).join("");
   const cards = steps.map((step, index) => {
     const point = positions.get(step.id);
-    return `<button class="step-card ${escape(step.state)} ${step.id === selectedStepId ? "selected" : ""}" type="button" data-select-step="${escape(step.id)}" style="left:${point.x}px;top:${point.y}px"><span class="number">${String(index + 1).padStart(2, "0")} · ${step.kind === "approval" ? "人工确认" : "执行任务"}</span><strong>${escape(step.title)}</strong><small>${escape(labels[step.state] ?? step.state)}</small></button>`;
+    return `<button class="step-card ${escape(step.state)} ${step.id === selectedStepId ? "selected" : ""}" type="button" data-select-step="${escape(step.id)}" style="left:${point.x}px;top:${point.y}px"><span class="number">${String(index + 1).padStart(2, "0")} · ${step.kind === "approval" ? "人工确认" : "执行任务"}</span><strong>${escape(step.title)}</strong><small>${escape(flow.state === "interrupted" && step.state === "running" ? "待核实" : labels[step.state] ?? step.state)}</small></button>`;
   }).join("");
   return `<div class="graph-wrap"><div class="graph-heading">步骤关系 · 点击节点查看与编辑</div><div class="graph-scroll"><div class="graph" style="width:${width}px;height:${height}px"><svg class="edges" width="${width}" height="${height}" aria-hidden="true"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="var(--accent)"/></marker></defs>${edges}</svg>${cards}</div></div></div>`;
 }
@@ -46,7 +46,7 @@ function inspector(flow, data) {
   const modelPicker = `<div class="field"><label>本步执行模型</label><select data-model="${escape(step.id)}"><option value="default">默认模型</option>${options.map(item => `<option value="${escape(item.value)}" ${item.value === selectedModel ? "selected" : ""}>${escape(item.label)}</option>`).join("")}</select></div>`;
   const prerequisites = flow.steps.filter(item => item.id !== step.id).map(item => `<button type="button" class="dependency ${step.dependsOn.includes(item.id) ? "selected" : ""}" data-action="toggleDependency" data-value="${attr({ flowId: flow.id, stepId: step.id, prerequisiteId: item.id })}"><span>${step.dependsOn.includes(item.id) ? "✓" : "+"} ${escape(item.title)}</span><small>${step.dependsOn.includes(item.id) ? "前置" : "添加"}</small></button>`).join("");
   const prior = step.dependsOn.map(id => flow.steps.find(item => item.id === id)?.title).filter(Boolean).join("、") || "无，可立即开始";
-  return `<aside class="inspector"><h3>${escape(step.title)}</h3><p>${escape(labels[step.state] ?? step.state)} · ${step.kind === "approval" ? "人工确认" : "执行任务"}</p>${draft ? `
+  return `<aside class="inspector"><h3>${escape(step.title)}</h3><p>${escape(flow.state === "interrupted" && step.state === "running" ? "待核实" : labels[step.state] ?? step.state)} · ${step.kind === "approval" ? "人工确认" : "执行任务"}</p>${draft ? `
     ${form("步骤名称", "editStepTitle", flow.id, step.id, step.title)}
     <div class="field"><label>步骤类型</label><select data-kind="${escape(step.id)}"><option value="task" ${step.kind === "task" ? "selected" : ""}>执行任务</option><option value="approval" ${step.kind === "approval" ? "selected" : ""}>人工确认</option></select></div>
     ${form(step.kind === "approval" ? "确认条件" : "目标与完成条件", "editStep", flow.id, step.id, step.instruction, true)}

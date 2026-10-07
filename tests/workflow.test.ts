@@ -8,6 +8,36 @@ import { activate } from "../src/index";
 const roots: string[] = [];
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
 
+test("opening a restarted workflow restores exact completed nodes and leaves uncertain nodes for review", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-reopen-"));
+  roots.push(root);
+  await writeFile(join(root, "flows.json"), JSON.stringify({ version: 1, flows: [{ id: "flow", projectId: "project", title: "Recover", state: "running", createdAt: 1, steps: [
+    { id: "a", title: "A", instruction: "Do A", dependsOn: [], state: "running", target: { projectId: "project", sessionId: "session-a" }, runId: "run-a" },
+    { id: "b", title: "B", instruction: "Do B", dependsOn: [], state: "running", target: { projectId: "project", sessionId: "session-b" }, runId: "run-b" },
+  ] }] }));
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
+    options: async () => ({ models: [] }), target() {}, prepare() {}, startRole() {},
+    inspect: async (_target: unknown, runId: string) => ({ outcome: runId === "run-a" ? "completed" : "unknown", busy: false }),
+    result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: `Restored ${runId}` }),
+  } } as unknown as PluginContext;
+  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!workbench?.render) throw new Error("Workflow workbench missing");
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const firstView = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
+  expect(JSON.stringify(firstView.children)).toContain("B · 待核实");
+  const saved = JSON.parse(await readFile(join(root, "flows.json"), "utf8"));
+  expect(saved.flows[0].state).toBe("interrupted");
+  expect(saved.flows[0].steps[0]).toMatchObject({ state: "completed", result: "Restored run-a" });
+  expect(saved.flows[0].steps[1].state).toBe("running");
+  const settledHost = { ...host, scheduling: { ...host.scheduling, inspect: async () => ({ outcome: "completed", busy: false }) } } as unknown as PluginContext;
+  const settled = (await activate(settledHost))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  if (!settled?.render) throw new Error("Workflow workbench missing after restart");
+  await settled.render({ id: settled.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
+  const completed = JSON.parse(await readFile(join(root, "flows.json"), "utf8"));
+  expect(completed.flows[0].state).toBe("completed");
+  expect(completed.flows[0].steps[1]).toMatchObject({ state: "completed", result: "Restored run-b" });
+});
+
 test("a failed step continues in its original conversation before downstream steps run", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-continue-"));
   roots.push(root);

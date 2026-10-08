@@ -587,46 +587,6 @@ export const activate: PluginModule["activate"] = async host => {
       return { flowId: flow.id, title: flow.title, status: "draft", message: "工作流已显示在当前聊天的图形卡片中，可直接允许执行或编辑节点。不要重复输出步骤表格，也不要要求用户打开工作台或寻找 Start 按钮。" };
     } }],
     ui: [{
-      id: "modera.workflow.workbench", slot: "workbench", frontend: "workbench", workbench: { title: "工作流", icon: "network", order: -101 },
-      requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-      actions: ["create", "showFlow", "showPage", "showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "requestDeleteStep", "cancelDeleteStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "continueFailed", "refresh"], act,
-      async render(_request, context) {
-        if (!context.projectId) return { title: "工作流", children: [{ type: "text", text: "请先选择项目。" }] };
-        const projectId = context.projectId;
-        const available = await host.scheduling!.options!(projectId);
-        const selected = available.models[0];
-        const allFlows = state.flows.filter(item => item.projectId === projectId);
-        const page = Math.min(flowPages.get(projectId) ?? 0, Math.max(0, Math.ceil(allFlows.length / 10) - 1));
-        const flows = allFlows.slice(page * 10, page * 10 + 10);
-        await Promise.all(flows.map(reconcileFlow));
-        const active = flows.find(item => item.id === selectedFlows.get(projectId)) ?? flows[0];
-        return { title: "工作流", data: {
-          flows: flows.map(item => ({ id: item.id, title: item.title, state: item.state, createdAt: item.createdAt, stepCount: item.steps.length })),
-          page, pageCount: Math.max(1, Math.ceil(allFlows.length / 10)), totalFlows: allFlows.length,
-          active: active ? { id: active.id, title: active.title, state: active.state, error: active.error, steps: active.steps.map(step => ({
-            id: step.id, title: step.title, instruction: step.instruction, kind: step.kind ?? "task", state: step.state,
-            dependsOn: dependencies(active, step), selection: step.selection, target: step.target, runId: step.runId,
-            result: step.result?.slice(0, 1500), resultTruncated: step.resultTruncated, resultPreviewTruncated: (step.result?.length ?? 0) > 1500,
-            handoff: step.handoff?.slice(0, 1500), handoffPreviewTruncated: (step.handoff?.length ?? 0) > 1500, previousSessions: step.previousSessions,
-          })) } : undefined,
-          selectedStepId: active ? selectedSteps.get(active.id) : undefined,
-          deleteStepId: active ? deleteConfirmations.get(active.id) : undefined,
-          models: availableModels(available.models).map(item => ({ value: item.value, label: item.label })),
-          outcome: active ? await activeOutcome(active) : undefined,
-        }, children: [
-      { type: "text", text: "在聊天输入 /workflow 和你的目标，AI 会先给出可检查的步骤草稿。可改名称、要求、类型及前置步骤；无依赖的任务会并行运行，汇总步骤会等待所有前置步骤完成。执行任务使用独立会话，但共享当前项目工作目录；可能修改同一文件的步骤请设置前置依赖，避免并发覆盖。人工确认步骤会暂停等待你检查。" },
-          { type: "text", text: selected?.models[0] ? `默认执行模型：${selected.name} / ${selected.models[0]}` : "执行任务步骤需要配置模型；人工确认步骤不需要。" },
-          { type: "button", label: "刷新状态", action: "refresh" },
-          ...(flows.length ? [{ type: "text" as const, text: `选择工作流 · ${allFlows.length} 项 · 第 ${page + 1}/${Math.ceil(allFlows.length / 10)} 页` }] : []),
-          ...flows.map(item => ({ type: "button" as const, label: `${item.title.slice(0, 60)} · ${flowStates[item.state]}${item.id === active?.id ? " ✓" : ""}`, action: "showFlow", value: item.id })),
-          ...(allFlows.length > 10 ? [{ type: "row" as const, children: [
-            ...(page > 0 ? [{ type: "button" as const, label: "上一页", action: "showPage", value: String(page - 1) }] : []),
-            ...(page < Math.ceil(allFlows.length / 10) - 1 ? [{ type: "button" as const, label: "下一页", action: "showPage", value: String(page + 1) }] : []),
-          ] }] : []),
-          ...(active ? nodes(active, available.models, await activeOutcome(active)) : []),
-        ] };
-      },
-    }, {
       id: "modera.workflow.result", slot: "tool.result", frontend: "workbench", toolNames: ["workflow_draft"],
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
       actions: ["showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "requestDeleteStep", "cancelDeleteStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "continueFailed", "refresh"], act,

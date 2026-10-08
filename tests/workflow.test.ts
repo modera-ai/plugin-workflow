@@ -8,6 +8,38 @@ import { activate } from "../src/index";
 const roots: string[] = [];
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
 
+test("the inline graph is bound to its tool result and can execute without opening the workbench", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modera-workflow-inline-"));
+  roots.push(root);
+  let background: Promise<void> | undefined;
+  const started: string[] = [];
+  const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {},
+    runBackground(_context: unknown, task: (signal: AbortSignal) => Promise<void>) { background = task(new AbortController().signal); },
+    scheduling: {
+      options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"] }] }),
+      target: async (projectId: string, sessionId: string, selection: unknown) => ({ projectId, sessionId, selection }),
+      prepare: async (target: object, title: string) => ({ ...target, sessionId: title }),
+      startRole: async (_target: unknown, role: { name: string }) => { started.push(role.name); return { runId: role.name }; },
+      inspect: async () => ({ outcome: "completed" }), result: async () => ({ outcome: "completed", text: "Done" }),
+    },
+  } as unknown as PluginContext;
+  const contributions = await activate(host);
+  const context = { projectId: "project", signal: host.signal } as ToolContext;
+  const raw = { title: "Inline", steps: [{ title: "Build", instruction: "Build app" }, { title: "Verify", instruction: "Check app" }] };
+  const result = await contributions!.tools![0]!.execute(raw, context) as { flowId: string };
+  await contributions!.tools![0]!.execute({ ...raw, title: "Other flow" }, context);
+  const card = contributions!.ui!.find(item => item.id === "modera.workflow.result")!;
+  expect(card.frontend).toBe("workbench");
+  const request = { id: card.id, projectId: "project", sessionId: "chat", locale: "zh-CN", tool: { name: "workflow_draft", input: JSON.stringify(raw), result: JSON.stringify(result) } };
+  const before = await card.render!(request, context);
+  expect(before.data).toMatchObject({ mode: "inline", active: { id: result.flowId, title: "Inline", state: "draft" } });
+  expect(started).toEqual([]);
+  await card.act!({ id: "start", value: result.flowId }, context, request);
+  await background;
+  expect(started).toEqual(["Build", "Verify"]);
+  expect((await card.render!(request, context)).data).toMatchObject({ active: { state: "completed" } });
+});
+
 test("a ten-step draft is accepted and an eleventh step is rejected", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-ten-steps-"));
   roots.push(root);

@@ -584,7 +584,7 @@ export const activate: PluginModule["activate"] = async host => {
     tools: [{ definition: declaredTool(manifest, "workflow_draft"), async execute(raw, context) {
       if (!context.projectId) throw new Error("请选择项目");
       const flow = await create(context.projectId, raw);
-      return { flowId: flow.id, title: flow.title, status: "draft", message: "草稿已保存，等待用户检查并确认执行" };
+      return { flowId: flow.id, title: flow.title, status: "draft", message: "工作流已显示在当前聊天的图形卡片中，可直接允许执行或编辑节点。不要重复输出步骤表格，也不要要求用户打开工作台或寻找 Start 按钮。" };
     } }],
     ui: [{
       id: "modera.workflow.workbench", slot: "workbench", frontend: "workbench", workbench: { title: "工作流", icon: "network", order: -101 },
@@ -627,7 +627,7 @@ export const activate: PluginModule["activate"] = async host => {
         ] };
       },
     }, {
-      id: "modera.workflow.result", slot: "tool.result", toolNames: ["workflow_draft"],
+      id: "modera.workflow.result", slot: "tool.result", frontend: "workbench", toolNames: ["workflow_draft"],
       requiredPermissions: ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
       actions: ["showStep", "toggleDependency", "editTitle", "editStepTitle", "editStep", "addStep", "requestDeleteStep", "cancelDeleteStep", "deleteStep", "moveUp", "moveDown", "setStepKind", "setModel", "approveStep", "start", "retry", "rerunUnknown", "continueFailed", "refresh"], act,
       async render(request, context) {
@@ -636,7 +636,13 @@ export const activate: PluginModule["activate"] = async host => {
         const flow = result.flowId ? state.flows.find(item => item.id === result.flowId && item.projectId === context.projectId) : undefined;
         if (flow) await reconcileFlow(flow);
         const models = flow ? (await host.scheduling!.options!(context.projectId)).models : [];
-        return { title: "工作流草稿", live: true, children: flow ? nodes(flow, models, await activeOutcome(flow)) : [{ type: "text", text: "草稿生成中或已移除" }] };
+        return { title: "工作流", live: true, data: {
+          mode: "inline",
+          active: flow ? { ...flow, steps: flow.steps.map(step => ({ ...step, kind: step.kind ?? "task", dependsOn: dependencies(flow, step) })) } : undefined,
+          models: availableModels(models).map(item => ({ value: item.value, label: item.label })),
+          deleteStepId: flow ? deleteConfirmations.get(flow.id) : undefined,
+          outcome: flow ? await activeOutcome(flow) : undefined,
+        }, children: flow ? nodes(flow, models, await activeOutcome(flow)) : [{ type: "text", text: "工作流生成中或已移除" }] };
       },
     }],
   };

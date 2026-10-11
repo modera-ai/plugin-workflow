@@ -2,9 +2,19 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, test } from "vitest";
-import type { PluginContext, ToolContext } from "@modera/plugin-sdk";
+import type { PluginContext, ToolContext, PluginContributions } from "@modera/plugin-sdk";
 import { activate } from "../src/index";
+import manifest from "../plugin.json";
 
+// These persisted-flow fixtures simulate the host binding a tool result to its card.
+function fixtureResultCard(contributions: PluginContributions | void, root: string) {
+  const card = contributions?.ui?.find(item => item.id === "modera.workflow.result");
+  if (!card) return undefined;
+  return { ...card, async render(request: Parameters<typeof card.render>[0], context: ToolContext) {
+    const stored = JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { id: string }[] };
+    return card.render({ ...request, tool: request.tool ?? { name: "workflow_draft", input: "{}", result: JSON.stringify({ flowId: stored.flows[0]?.id }) } }, context);
+  } };
+}
 const roots: string[] = [];
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
 
@@ -24,6 +34,9 @@ test("the inline graph is bound to its tool result and can execute without openi
     },
   } as unknown as PluginContext;
   const contributions = await activate(host);
+  expect(manifest.extensions).toEqual(["tool.result"]);
+  expect(contributions!.ui!.map(item => item.slot)).toEqual(manifest.extensions);
+  expect(manifest.contributions).toContain("composer");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const raw = { title: "Inline", steps: [{ title: "Build", instruction: "Build app" }, { title: "Verify", instruction: "Check app" }] };
   const result = await contributions!.tools![0]!.execute(raw, context) as { flowId: string };
@@ -69,7 +82,7 @@ test("opening a restarted workflow restores exact completed nodes and leaves unc
     inspect: async (_target: unknown, runId: string) => ({ outcome: runId === "run-a" ? "completed" : "unknown", busy: false }),
     result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: `Restored ${runId}` }),
   } } as unknown as PluginContext;
-  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(await activate(host), root);
   if (!workbench?.render) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const firstView = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
@@ -79,7 +92,7 @@ test("opening a restarted workflow restores exact completed nodes and leaves unc
   expect(saved.flows[0].steps[0]).toMatchObject({ state: "completed", result: "Restored run-a" });
   expect(saved.flows[0].steps[1].state).toBe("running");
   const settledHost = { ...host, scheduling: { ...host.scheduling, inspect: async () => ({ outcome: "completed", busy: false }) } } as unknown as PluginContext;
-  const settled = (await activate(settledHost))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const settled = fixtureResultCard(await activate(settledHost), root);
   if (!settled?.render) throw new Error("Workflow workbench missing after restart");
   await settled.render({ id: settled.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
   const completed = JSON.parse(await readFile(join(root, "flows.json"), "utf8"));
@@ -101,7 +114,7 @@ test("restart restores a completed parallel task and waits for its approval with
     options: async () => ({ models: [{ profileId: "local", name: "Local", models: ["test"], efforts: { test: ["medium"] } }] }),
     target() {}, prepare() {}, startRole() {}, result() {}, inspect() {},
   } } as unknown as PluginContext;
-  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(await activate(host), root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const view = await workbench.render({ id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" }, context);
@@ -131,7 +144,7 @@ test("a replaced run cannot become a completed step through a stale result read 
     inspect: async (_target: unknown, runId?: string) => ({ outcome: runId ? "completed" : "unknown", busy: false }),
     result: async () => ({ outcome: "unknown", text: "" }),
   } } as unknown as PluginContext;
-  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(await activate(host), root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
@@ -159,7 +172,7 @@ test("a result replaced between inspect and read stops downstream execution", as
     },
   } as unknown as PluginContext;
   const contributions = await activate(host);
-  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(contributions, root);
   if (!workbench?.act || !contributions?.tools) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const created = await contributions.tools[0]!.execute({ title: "Race", steps: [{ title: "A", instruction: "Do A" }, { title: "B", instruction: "Do B" }] }, context) as { flowId: string };
@@ -194,7 +207,7 @@ test("a failed step continues in its original conversation before downstream ste
       result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: `result ${runId}` }),
     },
   } as unknown as PluginContext;
-  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(await activate(host), root);
   if (!workbench?.act) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   await workbench.act({ id: "continueFailed", value: JSON.stringify({ context: JSON.stringify({ flowId: "flow", stepId: "a" }), text: "Fix the failure" }) }, context, { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" });
@@ -229,7 +242,7 @@ test("independent workflow steps start together and a join waits for both result
     },
   } as unknown as PluginContext;
   const contributions = await activate(host);
-  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(contributions, root);
   if (!workbench?.act || !workbench.render || !contributions?.tools) throw new Error("Workflow contributions missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
@@ -257,7 +270,7 @@ test("independent workflow steps start together and a join waits for both result
   const view = await workbench.render(request, context);
   expect(JSON.stringify(view.children)).toContain("已完成");
   expect(JSON.stringify(view.children)).toContain("前置步骤：A、B");
-  expect(JSON.stringify(view.children)).toContain("可能修改同一文件的步骤请设置前置依赖");
+  expect(contributions.composer?.[0]?.description).toContain("步骤草稿");
 });
 
 test("a downstream step starts when its own prerequisite finishes while a sibling remains running", async () => {
@@ -286,7 +299,7 @@ test("a downstream step starts when its own prerequisite finishes while a siblin
     { title: "After A", instruction: "Do C", after: [1] },
     { title: "Join", instruction: "Combine", after: [2, 3] },
   ] }, context) as { flowId: string };
-  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(contributions, root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   await workbench.act({ id: "start", value: created.flowId }, context, request);
@@ -328,7 +341,7 @@ test("confirming an approval wakes its successor before an unrelated task finish
     { title: "After review", instruction: "Continue", after: [1] },
   ] }, context) as { flowId: string };
   const stepId = (JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: { id: string }[] }[] }).flows[0]!.steps[0]!.id;
-  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(contributions, root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   await workbench.act({ id: "setStepKind", value: JSON.stringify({ context: JSON.stringify({ flowId: created.flowId, stepId }), value: "approval" }) }, context, request);
@@ -363,7 +376,7 @@ test("a join receives every predecessor even when earlier results exceed the han
     },
   } as unknown as PluginContext;
   const contributions = await activate(host);
-  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(contributions, root);
   if (!workbench?.act || !workbench.render || !contributions?.tools) throw new Error("Workflow contributions missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
@@ -385,7 +398,7 @@ test("a join receives every predecessor even when earlier results exceed the han
   expect(saved.flows[0].steps[0].result).not.toContain("<handoff>");
   const rendered = await workbench.render(request, context);
   expect(JSON.stringify(rendered.children)).toContain("此处只显示部分结果");
-  expect(rendered.data?.active.steps[0]).toMatchObject({ handoff: "A_SUMMARY with checked files", handoffPreviewTruncated: false });
+  expect(rendered.data?.active.steps[0]).toMatchObject({ handoff: "A_SUMMARY with checked files", resultTruncated: true });
 });
 
 test("workflow draft accepts explicit graph edges and rejects cycles before saving", async () => {
@@ -430,7 +443,7 @@ test("interrupted parallel run recovers every completed node before rerunning un
       result: async (_target: unknown, runId: string) => ({ outcome: "completed", text: `result ${runId}` }),
     },
   } as unknown as PluginContext;
-  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(await activate(host), root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
@@ -443,26 +456,29 @@ test("interrupted parallel run recovers every completed node before rerunning un
   expect(JSON.stringify(view.children)).toContain("result run-a");
 });
 
-test("quick draft keeps its workflow name separate from the first step", async () => {
+test("a tool draft keeps its workflow name separate from the first step", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-quick-draft-"));
   roots.push(root);
   const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
     options: async () => ({ models: [] }), target() {}, prepare() {}, startRole() {}, result() {}, inspect() {},
   } } as unknown as PluginContext;
-  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const contributions = await activate(host);
+  const workbench = fixtureResultCard(contributions, root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
-  await workbench.act({ id: "create", value: JSON.stringify({ title: "发布新版本", steps: "安全检查；产品检查" }) }, context, request);
+  const draft = { title: "发布新版本", steps: [{ title: "安全检查", instruction: "安全检查" }, { title: "产品检查", instruction: "产品检查" }] };
+  await contributions!.tools![0]!.execute(draft, context);
   const created = (await workbench.render(request, context)).data?.active as { title: string; steps: { title: string }[] };
   expect(created.title).toBe("发布新版本");
   expect(created.steps.map(step => step.title)).toEqual(["安全检查", "产品检查"]);
-  await expect(workbench.act({ id: "create", value: JSON.stringify({ title: "", steps: "安全检查；产品检查" }) }, context, request)).rejects.toThrow("标题");
-  await workbench.act({ id: "create", value: "设计；实现" }, context, request);
+  await expect(contributions!.tools![0]!.execute({ ...draft, title: "" }, context)).rejects.toThrow("标题");
+  await contributions!.tools![0]!.execute({ title: "设计", steps: [{ title: "设计", instruction: "设计" }, { title: "实现", instruction: "实现" }] }, context);
   expect((await workbench.render(request, context)).data?.active).toMatchObject({ title: "设计" });
+  expect(workbench.actions).not.toContain("create");
 });
 
-test("workbench pages saved workflows and opens older drafts within their project", async () => {
+test("result cards reopen older drafts by their tool result and remain project scoped", async () => {
   const root = await mkdtemp(join(tmpdir(), "modera-workflow-pages-"));
   roots.push(root);
   await writeFile(join(root, "flows.json"), JSON.stringify({ version: 1, flows: Array.from({ length: 23 }, (_, index) => ({
@@ -472,26 +488,22 @@ test("workbench pages saved workflows and opens older drafts within their projec
   const host = { storagePath: root, signal: new AbortController().signal, invalidateUi() {}, runBackground() {}, scheduling: {
     options: async () => ({ models: [] }), target() {}, prepare() {}, startRole() {}, result() {}, inspect() {},
   } } as unknown as PluginContext;
-  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(await activate(host), root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   const first = await workbench.render(request, context);
-  expect(first.data).toMatchObject({ page: 0, pageCount: 3, totalFlows: 23 });
-  expect((first.data as { flows: unknown[] }).flows).toHaveLength(10);
-  expect(first.children.filter(node => node.type === "button" && node.action === "showFlow")).toHaveLength(10);
+  expect(first.data).toMatchObject({ mode: "inline", active: { id: "flow-1" } });
   expect(JSON.stringify(first.children)).toContain("Flow 1");
   expect(JSON.stringify(first.children)).not.toContain("Flow 23");
-  await workbench.act({ id: "showPage", value: "2" }, context, request);
-  const last = await workbench.render(request, context);
-  expect(last.data).toMatchObject({ page: 2, pageCount: 3, totalFlows: 23 });
-  expect((last.data as { flows: { id: string }[] }).flows.map(item => item.id)).toEqual(["flow-21", "flow-22", "flow-23"]);
-  expect(last.children.filter(node => node.type === "button" && node.action === "showFlow")).toHaveLength(3);
-  expect(JSON.stringify(last.children)).toContain("Flow 21");
-  await workbench.act({ id: "showFlow", value: "flow-23" }, context, request);
-  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("First 23");
-  await expect(workbench.act({ id: "showFlow", value: "flow-23" }, { ...context, projectId: "other" }, request)).rejects.toThrow("找不到");
-  await expect(workbench.act({ id: "showPage", value: "3" }, context, request)).rejects.toThrow("页码无效");
+  const bound = { ...request, tool: { name: "workflow_draft", input: "{}", result: JSON.stringify({ flowId: "flow-23" }) } };
+  const last = await workbench.render(bound, context);
+  expect(last.data).toMatchObject({ mode: "inline", active: { id: "flow-23" } });
+  expect(JSON.stringify(last.children)).toContain("First 23");
+  expect(JSON.stringify(last.children)).not.toContain("Flow 1");
+  expect((await workbench.render(bound, { ...context, projectId: "other" })).data?.active).toBeUndefined();
+  expect(workbench.actions).not.toContain("showFlow");
+  expect(workbench.actions).not.toContain("showPage");
 });
 
 test("inserting a step makes former successors wait and deleting it restores their dependencies", async () => {
@@ -508,7 +520,7 @@ test("inserting a step makes former successors wait and deleting it restores the
     { title: "Publish", instruction: "Publish", after: [1] },
     { title: "Join", instruction: "Join", after: [2, 3] },
   ] }, context) as { flowId: string };
-  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(contributions, root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   const readSteps = async () => (JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: { id: string; dependsOn: string[] }[] }[] }).flows[0]!.steps;
@@ -552,13 +564,12 @@ test("creating a workflow keeps the oldest record after one hundred entries and 
   const first = await activate(host);
   await first?.tools?.[0]?.execute({ title: "New flow", steps: [{ title: "First", instruction: "Do first" }, { title: "Second", instruction: "Do second" }] }, context);
   expect((JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: unknown[] }).flows).toHaveLength(101);
-  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(await activate(host), root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
-  await workbench.act({ id: "showPage", value: "10" }, context, request);
-  expect((await workbench.render(request, context)).data).toMatchObject({ pageCount: 11, totalFlows: 101 });
-  await workbench.act({ id: "showFlow", value: "flow-99" }, context, request);
-  expect(JSON.stringify((await workbench.render(request, context)).children)).toContain("Flow 99");
+  const bound = { ...request, tool: { name: "workflow_draft", input: "{}", result: JSON.stringify({ flowId: "flow-99" }) } };
+  expect((await workbench.render(bound, context)).data?.active).toMatchObject({ id: "flow-99", title: "Flow 99" });
+  expect(JSON.stringify((await workbench.render(bound, context)).children)).toContain("Flow 99");
 });
 
 test("a model draft waits for user confirmation and then runs native step conversations in order", async () => {
@@ -593,7 +604,7 @@ test("a model draft waits for user confirmation and then runs native step conver
     { title: "Verify", instruction: "Run checks" },
   ] }, context) as { flowId: string };
   expect(started).toEqual([]);
-  const workbench = contributions.ui.find(item => item.id === "modera.workflow.workbench")!;
+  const workbench = fixtureResultCard(contributions, root)!;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   const draft = await workbench.render(request, context);
   const stepForms = draft.children.filter(node => node.type === "form" && node.action === "editStep");
@@ -637,8 +648,7 @@ test("a model draft waits for user confirmation and then runs native step conver
   const selectedView = await workbench.render(request, context);
   expect(JSON.stringify(selectedView.children)).toContain("Draft note");
   expect(JSON.stringify(selectedView.children)).not.toContain("Change code");
-  await workbench.act!({ id: "showFlow", value: output.flowId }, context, request);
-  const switched = await workbench.render(request, context);
+  const switched = await workbench.render({ ...request, tool: { name: "workflow_draft", input: "{}", result: JSON.stringify({ flowId: output.flowId }) } }, context);
   expect(JSON.stringify(switched.children)).toContain("Change code");
   expect(JSON.stringify(switched.children)).not.toContain("Draft note");
   expect(another.flowId).not.toBe(output.flowId);
@@ -670,7 +680,7 @@ test("retry keeps completed steps when their former model is unavailable", async
     },
   } as unknown as PluginContext;
   const contributions = await activate(host);
-  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(contributions, root);
   if (!workbench?.act || !workbench.render || !contributions.tools?.[0]) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", sessionId: "parent", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
@@ -726,7 +736,7 @@ test("an uncertain step can be rerun only after explicit review and keeps its pr
       result: async () => ({ outcome: "completed", text: "done" }),
     },
   } as unknown as PluginContext;
-  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(await activate(host), root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", sessionId: "parent", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
@@ -768,7 +778,7 @@ test("parallel approval buttons confirm only their own step", async () => {
       result: async () => ({ outcome: "completed", text: "released" }),
     },
   } as unknown as PluginContext;
-  const workbench = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(await activate(host), root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
@@ -818,7 +828,7 @@ test("an approval can be confirmed while an independent task is still running", 
     { title: "Publish", instruction: "Publish", after: [1, 2] },
   ] }, context) as { flowId: string };
   const flow = (JSON.parse(await readFile(join(root, "flows.json"), "utf8")) as { flows: { steps: { id: string }[] }[] }).flows[0]!;
-  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(contributions, root);
   if (!workbench?.act || !workbench.render) throw new Error("Workflow workbench missing");
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
   await workbench.act({ id: "setStepKind", value: JSON.stringify({ context: JSON.stringify({ flowId: created.flowId, stepId: flow.steps[0]!.id }), value: "approval" }) }, context, request);
@@ -858,7 +868,7 @@ test("an approval step pauses after prior work and resumes from persisted state"
     },
   } as unknown as PluginContext;
   const contributions = await activate(host);
-  const workbench = contributions?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const workbench = fixtureResultCard(contributions, root);
   if (!workbench?.act || !workbench.render || !contributions.tools?.[0]) throw new Error("Workflow workbench missing");
   const context = { projectId: "project", sessionId: "parent", signal: host.signal } as ToolContext;
   const request = { id: workbench.id, sessionId: "", projectId: "project", locale: "zh-CN" };
@@ -882,7 +892,7 @@ test("an approval step pauses after prior work and resumes from persisted state"
   expect(JSON.stringify(paused.children)).toContain("等待人工确认");
   const approval = paused.children.find(node => node.type === "button" && node.action === "approveStep");
   expect(approval?.type === "button" ? JSON.parse(approval.value ?? "{}") : undefined).toMatchObject({ flowId });
-  const restarted = (await activate(host))?.ui?.find(item => item.id === "modera.workflow.workbench");
+  const restarted = fixtureResultCard(await activate(host), root);
   if (!restarted?.act || !restarted.render) throw new Error("Restarted workbench missing");
   await restarted.act({ id: "approveStep", value: approval?.type === "button" ? approval.value : undefined }, context, request);
   await background;

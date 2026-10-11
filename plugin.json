@@ -11,7 +11,7 @@
   "main": "dist/index.cjs",
   "frontends": { "workbench": { "root": "dist/ui", "entry": "index.html" } },
   "permissions": ["storage.read", "storage.write", "runs.schedule", "runs.delegate", "runs.observe"],
-  "extensions": ["workbench", "tool.result"],
+  "extensions": ["tool.result"],
   "agentGuidance": "When the user asks to create a workflow, call workflow_draft with 2–10 concrete steps. For parallel branches or joins, set each step's optional after field to the 1-based numbers of its direct prerequisites; omitted after means the preceding step. Keep the graph acyclic. The graph appears inline in the current chat, where the user can allow execution or edit nodes. Do not replace the graph with a Markdown step table or tell the user to open a workbench or click Start. Briefly introduce the graph and await its inline execution decision.",
   "tools": [{
     "id": "workflow_draft",
@@ -30,5 +30,6 @@
       }, "required": ["title", "steps"]
     }
   }],
-  "locales": { "zh-CN": { "name": "工作流", "description": "先审阅步骤，再逐步执行复杂任务。" } }
+  "locales": { "zh-CN": { "name": "工作流", "description": "先审阅步骤，再逐步执行复杂任务。" } },
+  "contributions": ["composer"]
 }

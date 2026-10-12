@@ -2,7 +2,7 @@
   "apiVersion": 1,
   "id": "modera.workflow",
   "name": "Workflow",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Review a dependency graph of steps before running each in a native task conversation.",
   "author": "Modera",
   "category": "tasks",
